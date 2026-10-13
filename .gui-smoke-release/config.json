@@ -1,0 +1,7 @@
+{
+  "enabled": false,
+  "interval_seconds": 60,
+  "min_improvement": 12,
+  "cooldown_seconds": 600,
+  "target_ssid": "AP-TUT5"
+}
