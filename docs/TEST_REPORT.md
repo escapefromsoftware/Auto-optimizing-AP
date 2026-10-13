@@ -330,4 +330,37 @@ Release/Debugそれぞれで、分離した既存の`.gui-smoke-release` / `.gui
 
 コードレビューでは、グラフ評価が既存`Optimizer::rank`、診断が既存`BlackBox::load_records`と`query_wlan_events`、JSONエスケープ/Black Box JSONが既存CLI関数を呼び、コアロジックを複製していないことを確認した。グラフバッファは直近1時間・最大600件、期間切替はバッファの時刻フィルタだけ、エクスポートは表示期間内だけである。診断のイベントログ取得不可表示は既存APIのmessage/error codeを保持する。全ウィンドウにDPI換算レイアウトと`WM_DPICHANGED`処理があり、GUIソースは`/utf-8`でコンパイルされた。
 
+## Priority 6: Application-aware Optimization / Personalized AP Learning（2026-10-14）
+
+Codex（gpt-5.6-sol）による実装中にChatGPT使用量上限（"try again at 2:30 AM"）に達し、ビルド・テストの自己検証途中でジョブが失敗した。実装自体はコード上ほぼ完了していたため、以降の検証・修正・リリースはClaude（本レポート作成者）が直接引き継いだ。
+
+### ビルドと単体テスト
+
+- `cmake --build build --config Release --parallel`: 全ターゲット成功。警告・エラーなし。
+- `cmake --build build --config Debug --parallel`: 全ターゲット成功。警告・エラーなし。
+- `ctest --test-dir build -C Release --output-on-failure`: 1/1成功、0失敗。
+- `ctest --test-dir build -C Debug`: 直後の実行はこのマシンのWindows Smart App Controlにより`wifiopt_tests.exe`の起動がブロックされ（`BAD_COMMAND`/`Process not started`）、複数回リトライしても解消しなかった。同一のテストバイナリはReleaseで成功しているため、テストロジック自体の問題ではなく環境側の一時的な制約と判断した。セキュリティ設定の変更は行っていない。
+
+### CLIの実機確認について
+
+`wifiopt mode` / `wifiopt mode gaming` / `wifiopt auto status` / `wifiopt history --stats` を実行しようとしたところ、Release・Debug双方の`wifiopt.exe`がSmart App Controlにブロックされ、30秒間のリトライでも解消しなかった。このためCLIの実行結果による確認はできず、代わりに以下をソースコードレビューで確認した。
+
+- `src/main.cpp`の`mode`コマンド: 引数なしで現在値表示、指定時は`target`コマンドと同様に`enabled`等の他設定を変更せず`mode`だけを永続化する。不正な値は終了コード2。
+- `src/optimizer.cpp`の`mode_hysteresis_threshold`/`mode_allows_automatic_switch`: gaming/callで追加マージンを加算し、manualは自動切替のみを抑制する（`optimize_once`の`automatic`引数により、ユーザーが明示的に実行した場合はmanualでも通常閾値で動作する設計を確認）。
+- `run_daemon`内のプロセス検出: `process_detection_enabled`が真の場合のみ列挙し、失敗時はmanual相当へ安全側フォールバック、通話アプリ検出時のみcall相当に一時昇格する。検出失敗・非検出時に余計な抑制が働かないことをコードで確認した。
+- `src/storage.cpp`の履歴パース: 7列・8列・9列（`duration_ms`追加）を後方互換で読み込み、不正値は行単位で無視する。
+- `src/core.cpp`の`score_access_point`: `connection_history_half_life_days`が未設定（既定）の場合は既存のラプラス平滑化と完全に同じ経路を通り、設定時のみ指数時間減衰（半減期ベース）が有効になることを確認した。
+
+### 確認できた範囲と未確認事項
+
+確認済み: 上記の静的コードレビュー、Release構成でのビルド成功とユニットテスト全件成功（新規追加分を含む）。
+
+未確認（成功扱いにしない）:
+- `wifiopt mode`系コマンドおよび`auto status`/`history --stats`の実行結果表示（Smart App Controlのブロックにより未実施）
+- 実際のゲーム・通話アプリ実行中におけるプロセス検出の動作、および検出に伴うモード一時昇格の実地効果
+- 時間帯別統計・時間減衰スコアリングの長期運用での妥当性
+- 実際のAP切替を伴うClosed-loop検証（本タスクでも実施していない）
+
+Co-Authored-By: Codex (gpt-5.6-sol), Claude Sonnet 5
+
 一方、実際にマウスで「グラフ」「比較」「診断」や各エクスポートボタンを押した操作、実APからの周期サンプル取得、CSV/JSON保存ダイアログ操作、比較/診断本文の実データ表示は**未確認**である。グラフの線、凡例、日本語文字、列幅、ウィンドウサイズ変更、スクロール、選択操作、トレイとの併用、Per-Monitor DPI v2での複数モニター間移動をスクリーンショットまたは目視では確認していない。これらをスモークテスト成功やビルド成功から外観・操作感の成功とは扱わない。

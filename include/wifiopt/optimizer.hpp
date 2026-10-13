@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <optional>
+#include <string_view>
 
 namespace wifiopt {
 
@@ -30,13 +31,30 @@ struct OptimizeResult {
   std::optional<IpVerificationResult> ip_verification;
 };
 
+enum class OptimizationMode { normal, gaming, call, manual };
+
+std::optional<OptimizationMode> parse_optimization_mode(std::string_view value) noexcept;
+std::string_view optimization_mode_name(OptimizationMode mode) noexcept;
+double mode_hysteresis_threshold(const AutoConfig& config, OptimizationMode mode) noexcept;
+bool mode_allows_automatic_switch(OptimizationMode mode) noexcept;
+
+struct ProcessDetectionResult {
+  bool success{};
+  bool matched{};
+  std::string matched_name;
+  std::uint32_t error_code{};
+};
+
+ProcessDetectionResult detect_monitored_process(
+    const std::vector<std::string>& process_names) noexcept;
+
 class Optimizer {
  public:
   explicit Optimizer(Storage& storage, BlackBox* blackbox = nullptr)
       : storage_(storage), blackbox_(blackbox) {}
   std::vector<RankedAccessPoint> rank(WlanClient& wlan, const std::string& ssid);
   OptimizeResult optimize_once(WlanClient& wlan, const AutoConfig& config,
-                               bool force_evaluation = true, bool dry_run = false);
+                               bool automatic = false, bool dry_run = false);
  private:
   Storage& storage_;
   BlackBox* blackbox_{};

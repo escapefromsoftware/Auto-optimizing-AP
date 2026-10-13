@@ -3,6 +3,7 @@
 #include "wifiopt/core.hpp"
 
 #include <cstdint>
+#include <array>
 #include <map>
 #include <optional>
 #include <string>
@@ -41,6 +42,8 @@ struct HistoryStats {
   unsigned ap_switches{};
   std::map<std::string, ApHistoryStats> by_bssid;
   std::map<std::uint32_t, unsigned> error_counts;
+  std::array<ApHistoryStats, 4> by_time_band{};
+  std::optional<double> average_connection_time_ms;
 };
 
 HistoryStats compute_history_stats(const std::vector<ConnectionRecord>& rows);

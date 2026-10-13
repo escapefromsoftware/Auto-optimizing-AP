@@ -1,6 +1,7 @@
 #include "wifiopt/optimizer.hpp"
 
 #include <windows.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <chrono>
@@ -20,7 +21,84 @@ std::string verification_detail(const IpVerificationResult& verification) {
          (verification.verified ? "passed: " : "failed: ") + verification.detail;
 }
 
+std::wstring utf8_to_wide(const std::string& value) {
+  if (value.empty()) return {};
+  const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+                                       static_cast<int>(value.size()), nullptr, 0);
+  if (size <= 0) return {};
+  std::wstring result(static_cast<std::size_t>(size), L'\0');
+  if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+                           static_cast<int>(value.size()), result.data(), size)) return {};
+  return result;
+}
+
 } // namespace
+
+std::optional<OptimizationMode> parse_optimization_mode(std::string_view value) noexcept {
+  if (value == "normal") return OptimizationMode::normal;
+  if (value == "gaming") return OptimizationMode::gaming;
+  if (value == "call") return OptimizationMode::call;
+  if (value == "manual") return OptimizationMode::manual;
+  return std::nullopt;
+}
+
+std::string_view optimization_mode_name(OptimizationMode mode) noexcept {
+  switch (mode) {
+    case OptimizationMode::normal: return "normal";
+    case OptimizationMode::gaming: return "gaming";
+    case OptimizationMode::call: return "call";
+    case OptimizationMode::manual: return "manual";
+  }
+  return "normal";
+}
+
+double mode_hysteresis_threshold(const AutoConfig& config, OptimizationMode mode) noexcept {
+  if (mode == OptimizationMode::gaming)
+    return config.min_improvement + config.gaming_additional_margin;
+  if (mode == OptimizationMode::call)
+    return config.min_improvement + config.call_additional_margin;
+  return config.min_improvement;
+}
+
+bool mode_allows_automatic_switch(OptimizationMode mode) noexcept {
+  return mode != OptimizationMode::manual;
+}
+
+ProcessDetectionResult detect_monitored_process(
+    const std::vector<std::string>& process_names) noexcept {
+  ProcessDetectionResult result;
+  const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) {
+    result.error_code = GetLastError();
+    return result;
+  }
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  if (!Process32FirstW(snapshot, &entry)) {
+    result.error_code = GetLastError();
+    CloseHandle(snapshot);
+    return result;
+  }
+  result.success = true;
+  do {
+    for (const auto& configured : process_names) {
+      const auto wide = utf8_to_wide(configured);
+      if (!wide.empty() && _wcsicmp(entry.szExeFile, wide.c_str()) == 0) {
+        result.matched = true;
+        result.matched_name = configured;
+        CloseHandle(snapshot);
+        return result;
+      }
+    }
+  } while (Process32NextW(snapshot, &entry));
+  const DWORD last_error = GetLastError();
+  CloseHandle(snapshot);
+  if (last_error != ERROR_NO_MORE_FILES) {
+    result.success = false;
+    result.error_code = last_error;
+  }
+  return result;
+}
 
 std::vector<RankedAccessPoint> Optimizer::rank(WlanClient& wlan, const std::string& ssid) {
   // Scan every SSID so co-channel neighbor counts include other networks too.
@@ -33,10 +111,16 @@ std::vector<RankedAccessPoint> Optimizer::rank(WlanClient& wlan, const std::stri
   return rank_access_points(std::move(aps));
 }
 
-OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& config, bool, bool dry_run) {
+OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& config,
+                                        bool automatic, bool dry_run) {
   OptimizeResult out;
+  auto mode = parse_optimization_mode(config.mode).value_or(OptimizationMode::normal);
+  // Manual mode constrains only daemon automation. An explicit optimize command
+  // remains an intentional user action and uses the normal threshold.
+  if (!automatic && mode == OptimizationMode::manual) mode = OptimizationMode::normal;
+  if (automatic && !mode_allows_automatic_switch(mode)) dry_run = true;
   out.dry_run = dry_run;
-  out.threshold = config.min_improvement;
+  out.threshold = mode_hysteresis_threshold(config, mode);
   auto ranked = rank(wlan, config.target_ssid);
   if (ranked.empty()) { out.message = "No BSS found for SSID '" + config.target_ssid + "'"; return out; }
   out.recommended = ranked.front();
@@ -52,10 +136,10 @@ OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& conf
   if (current != ranked.end()) {
     const double improvement = ranked.front().scoring.score - current->scoring.score;
     out.improvement = improvement;
-    if (improvement < config.min_improvement) {
+    if (improvement < out.threshold) {
       std::ostringstream s;
       s << "No switch: expected improvement " << improvement << " is below hysteresis threshold "
-        << config.min_improvement;
+        << out.threshold;
       out.success = true;
       out.message = s.str();
       return out;
@@ -70,7 +154,10 @@ OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& conf
   }
 
   out.action_taken = true;
+  const auto connect_started = std::chrono::steady_clock::now();
   out.connection = wlan.connect_bssid(config.target_ssid, ranked.front().ap.bssid);
+  const auto connect_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - connect_started);
   const auto& c = *out.connection;
   auto after = wlan.status();
   if (c.success && c.desired_bssid_matched && after.connected) {
@@ -88,7 +175,8 @@ OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& conf
   const ConnectionRecord connection_record{
       unix_now(), config.target_ssid, c.requested_bssid, c.actual_bssid, out.success,
       error_code, connection_detail,
-      out.ip_verification ? std::optional<bool>(out.ip_verification->verified) : std::nullopt};
+      out.ip_verification ? std::optional<bool>(out.ip_verification->verified) : std::nullopt,
+      static_cast<std::uint64_t>(connect_duration.count())};
   storage_.append_history(connection_record);
   if (blackbox_) {
     blackbox_->record_connection(connection_record, make_wifi_observation(after));
@@ -98,7 +186,10 @@ OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& conf
 
   if (!out.success && before.connected && before.ssid == config.target_ssid && valid_bssid(before.bssid)) {
     // One bounded rollback attempt; never modify the saved enterprise profile.
+    const auto rollback_started = std::chrono::steady_clock::now();
     auto rollback = wlan.connect_bssid(config.target_ssid, before.bssid, std::chrono::seconds(20));
+    const auto rollback_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - rollback_started);
     auto after_rollback = wlan.status();
     std::optional<IpVerificationResult> rollback_ip;
     if (rollback.success && rollback.desired_bssid_matched && after_rollback.connected) {
@@ -115,7 +206,8 @@ OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& conf
     const ConnectionRecord rollback_record{
         unix_now(), config.target_ssid, before.bssid, rollback.actual_bssid,
         rollback_verified, rollback_error, rollback_detail,
-        rollback_ip ? std::optional<bool>(rollback_ip->verified) : std::nullopt};
+        rollback_ip ? std::optional<bool>(rollback_ip->verified) : std::nullopt,
+        static_cast<std::uint64_t>(rollback_duration.count())};
     storage_.append_history(rollback_record);
     if (blackbox_) {
       blackbox_->record_connection(rollback_record, make_wifi_observation(after_rollback));
@@ -190,8 +282,23 @@ int run_daemon(const std::filesystem::path&, Storage& storage) {
       storage.save_daemon_state(state);
       if (unix_now() - last_switch >= static_cast<std::int64_t>(config.cooldown_seconds)) {
         try {
-          const auto outcome = optimizer.optimize_once(wlan, config);
-          state.detail = outcome.message;
+          auto evaluation_config = config;
+          bool safety_dry_run = config.mode == "manual";
+          std::string context;
+          if (config.process_detection_enabled) {
+            const auto detection = detect_monitored_process(config.call_process_names);
+            if (!detection.success) {
+              evaluation_config.mode = "manual";
+              safety_dry_run = true;
+              context = "process detection failed (error " +
+                        std::to_string(detection.error_code) + "); manual safety fallback; ";
+            } else if (detection.matched && config.mode != "manual") {
+              evaluation_config.mode = "call";
+              context = "call process detected (" + detection.matched_name + "); ";
+            }
+          }
+          const auto outcome = optimizer.optimize_once(wlan, evaluation_config, true, safety_dry_run);
+          state.detail = context + outcome.message;
           if (outcome.action_taken) last_switch = unix_now();
         } catch (const std::exception& e) { state.detail = e.what(); }
       } else state.detail = "cooldown active";
