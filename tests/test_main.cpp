@@ -2,11 +2,13 @@
 #include "wifiopt/blackbox.hpp"
 #include "wifiopt/cli.hpp"
 #include "wifiopt/eventlog.hpp"
+#include "wifiopt/gui_logic.hpp"
 #include "wifiopt/storage.hpp"
 #include "wifiopt/wlan_client.hpp"
 
 #include <windows.h>
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -433,6 +435,39 @@ void test_eventlog_xml_parser() {
   CHECK(parsed->description == "802.1X/EAP authentication failed");
   CHECK(!parse_wlan_event_xml("<Event><System/></Event>"));
 }
+
+void test_gui_comparison_logic() {
+  AccessPoint first;
+  first.bssid = "00:11:22:33:44:50";
+  first.frequency_khz = 5180000;
+  first.channel = 36;
+  first.rssi_dbm = -48;
+  first.history_attempts = 8;
+  first.history_successes = 7;
+  AccessPoint second = first;
+  second.bssid = "00:11:22:33:44:58";
+  second.rssi_dbm = -65;
+  second.history_successes = 4;
+
+  const auto possible = assess_same_physical_ap(first, second);
+  CHECK(possible.possibly_same);
+  CHECK(possible.evidence.size() == 3);
+  CHECK(possible.explanation.find("not conclusive proof") != std::string::npos);
+
+  second.channel = 40;
+  second.frequency_khz = 5200000;
+  const auto rejected = assess_same_physical_ap(first, second);
+  CHECK(!rejected.possibly_same);
+  CHECK(rejected.explanation.find("BSSID similarity alone") != std::string::npos);
+
+  RankedAccessPoint ranked_first{first, ScoreResult{82.0, 61.0, {}}};
+  RankedAccessPoint ranked_second{second, ScoreResult{70.0, 55.0, {}}};
+  const std::array selected{ranked_first, ranked_second};
+  const auto recommendation = build_ap_recommendation(selected);
+  CHECK(recommendation.find("AP A is recommended") != std::string::npos);
+  CHECK(recommendation.find("strongest RSSI") != std::string::npos);
+  CHECK(recommendation.find("BSS Load information is unavailable") != std::string::npos);
+}
 } // namespace
 
 int main() {
@@ -457,7 +492,8 @@ int main() {
   test_blackbox_ring_and_disconnect_detection();
   test_blackbox_rotation_and_bssid_attribution();
   test_eventlog_xml_parser();
+  test_gui_comparison_logic();
   if (failures) { std::cerr << failures << " test assertion(s) failed\n"; return 1; }
-  std::cout << "All 21 test groups passed\n";
+  std::cout << "All 22 test groups passed\n";
   return 0;
 }

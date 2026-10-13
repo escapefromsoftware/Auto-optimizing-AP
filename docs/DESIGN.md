@@ -56,7 +56,7 @@ BSSID不一致またはIPv4確認失敗時、開始前が同じSSIDへの接続�
 
 ## Win32 GUI
 
-`src/gui_main.cpp`だけがGUI固有の実装で、`wifiopt_gui`は既存の`wifiopt_core`をリンクする。コア、WLAN、スコアリング、ストレージの実装はCLIと共通であり、GUI用の複製や別アルゴリズムは持たない。表示には標準Win32コントロールとCommon ControlsのListView/ListBoxを使用し、`Shell_NotifyIcon`で通知領域に常駐する。Explorer再起動時は登録済み`TaskbarCreated`メッセージでアイコンを再登録する。メインウィンドウのクラス名は`SmartWifiApOptimizerGuiWindow-v1`、タイトルは`Smart Wi-Fi AP Optimizer`である。
+`src/gui_main.cpp`がウィンドウ、GDI描画、非同期調停を担当し、`src/gui_logic.cpp`が比較推薦文と同一物理AP推定の副作用を持たないGUI用判定を担当する。`wifiopt_gui`は既存の`wifiopt_core`をリンクし、WLAN、スコアリング、Black Box、イベントログ、ストレージの実装はCLIと共通である。表示には標準Win32コントロールとCommon ControlsのListView/ListBoxを使用し、`Shell_NotifyIcon`で通知領域に常駐する。Explorer再起動時は登録済み`TaskbarCreated`メッセージでアイコンを再登録する。メインウィンドウのクラス名は`SmartWifiApOptimizerGuiWindow-v1`、タイトルは`Smart Wi-Fi AP Optimizer`である。
 
 UIスレッドは通常の`GetMessage`/`DispatchMessage`ループを所有する。スキャン、順位付け、BSSID指定接続、自動監視停止待ちは同期呼び出し時間が長いため、一度に1本だけのワーカースレッドで実行する。完了結果は保護された共有領域へ移し、`WM_APP`メッセージでUIスレッドへ通知する。コントロール更新とトレイ更新はUIスレッドだけで行う。終了時は進行中ワーカーをjoinしてからコアオブジェクトとウィンドウを破棄する。
 
@@ -69,6 +69,20 @@ WLAN接続通知はGUIのウィンドウメッセージへ直接統合しない�
 ランキングには品質スコア列と従来の選択スコア列を並べる。選択行のダブルクリックまたは「Details」でモデルレス詳細ウィンドウを表示し、基本無線情報、PHY/ビーコン間隔、BSS Load、IE解析結果、両スコアと既存の理由文字列をまとめる。詳細ウィンドウは起動時に非表示で生成し、GUIスモークテストでボタンと内容コントロールの存在を検証できるようにする。
 
 最終検出日時はAPのビーコンTimestampではない。スキャンでBSSIDを観測した時刻を`Storage::record_observations`が`last_seen.tsv`へ原子的に保存し、その観測時刻であることを画面に明記する。リンク速度は現在接続中のBSSIDだけを対象に、WLANインターフェイスGUIDを`ConvertInterfaceGuidToLuid`で変換し、`GetIfEntry2`の`ReceiveLinkSpeed`/`TransmitLinkSpeed`を読む。未接続APやAPI取得失敗は欠損として明示する。
+
+### Priority 5 GUI拡張
+
+グラフ、比較、診断はメインウィンドウ所有のモデルレスウィンドウで、起動時に非表示で生成する。これにより既存のトレイ常駐を維持し、スモークテストは実WLANデータがなくてもウィンドウクラスと子コントロールの生成を確認できる。各ビューの閉じる操作はビューを非表示にするだけで、メインウィンドウ、トレイ、自動最適化プロセスへ終了や設定変更を伝播しない。
+
+リアルタイムグラフは表示時の`WM_SHOWWINDOW`で7秒周期の`SetTimer`を開始し、非表示時および`WM_NCDESTROY`で`KillTimer`する。`WM_TIMER`はスキャン自体を行わず、専用ワーカーを1本だけ起動する。ワーカーは既存`Optimizer::rank`を呼び、対象SSIDの`current` APからRSSI、Signal Quality、選択スコアを1サンプルにする。結果は`WM_APP`でUIスレッドへ戻し、直近1時間かつ最大600件のメモリバッファへ追加する。表示期間（1/5/30/60分）の変更はバッファの時刻フィルタと再描画だけであり、スキャン周期を変更しない。GDIの`Polyline`でRSSIを-100～-30 dBm、Signal Qualityと選択スコアを0～100へ写像する。CSV/JSON出力も現在の表示期間に含まれるサンプルだけを対象とする。
+
+既存の操作ワーカーとグラフワーカーは独立してUIメッセージループを塞がない。一方、両者が同一プロセス内で`Storage`を介して観測・履歴を読む区間はmutexで直列化し、同時ファイル更新を避ける。終了時は停止フラグを設定して両ワーカーをjoinしてから各ウィンドウを破棄する。グラフを閉じた時点で新しい周期処理は停止し、すでに開始済みの読み取り専用スキャンだけは安全に完了させ、非表示なら結果を表示バッファへ追加しない。
+
+ランキングListViewは複数選択を許可する。比較ビューは選択済み`RankedAccessPoint`をコピーし、信号、周波数帯/チャネル、BSS Load、`Storage::enrich_with_history`で付加済みの接続履歴、品質スコア、選択スコアを表示する。推薦文は選択スコア最大を基準に、RSSI、履歴成功率、BSS Load欠損を説明する。物理AP推定は「周波数一致」「チャネル一致」「正規化BSSIDの数値差16以内」の3条件が同時に成立した場合だけ可能性ありとし、全結果にヒューリスティックであり確実な証拠ではない旨を明記する。この純粋判定は`wifiopt_gui_logic`として単体テスト対象にする。
+
+診断ビューの更新は共通操作ワーカーで`BlackBox::load_records(20)`と`query_wlan_events(86400, 100)`を呼ぶだけで、障害分類やイベント抽出を再実装しない。イベントログ取得不能時は既存`EventLogResult::message`とWindowsエラーコードをそのまま表示する。JSON出力は既存`blackbox_record_json`と`json_escape`を再利用し、CLI診断レポートと同じschema version 1のBlack Box/Event Log構造を持つ。
+
+全ウィンドウはPer-Monitor DPI v2プロセスコンテキストを維持し、`WM_DPICHANGED`の推奨矩形、DPI換算した余白・列幅・フォントを適用する。日本語ラベルを含むGUIターゲットはMSVCの`/utf-8`でコンパイルする。
 
 ## セキュリティ境界
 

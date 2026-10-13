@@ -27,6 +27,12 @@ target_compile_definitions(wifiopt_core PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_
 target_compile_options(wifiopt_core PRIVATE /W4 /permissive- /EHsc)
 target_link_libraries(wifiopt_core PUBLIC wlanapi ole32 iphlpapi wevtapi)
 
+add_library(wifiopt_gui_logic src/gui_logic.cpp)
+target_include_directories(wifiopt_gui_logic PUBLIC include)
+target_compile_definitions(wifiopt_gui_logic PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(wifiopt_gui_logic PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(wifiopt_gui_logic PUBLIC wifiopt_core)
+
 add_executable(wifiopt src/main.cpp)
 target_compile_definitions(wifiopt PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(wifiopt PRIVATE /W4 /permissive- /EHsc)
@@ -34,14 +40,14 @@ target_link_libraries(wifiopt PRIVATE wifiopt_core)
 
 add_executable(wifiopt_gui WIN32 src/gui_main.cpp)
 target_compile_definitions(wifiopt_gui PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(wifiopt_gui PRIVATE /W4 /permissive- /EHsc)
-target_link_libraries(wifiopt_gui PRIVATE wifiopt_core comctl32 shell32 gdi32 user32)
+target_compile_options(wifiopt_gui PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(wifiopt_gui PRIVATE wifiopt_core wifiopt_gui_logic comctl32 shell32 gdi32 user32 comdlg32)
 
 enable_testing()
 add_executable(wifiopt_tests tests/test_main.cpp)
 target_compile_definitions(wifiopt_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(wifiopt_tests PRIVATE /W4 /permissive- /EHsc)
-target_link_libraries(wifiopt_tests PRIVATE wifiopt_core)
+target_link_libraries(wifiopt_tests PRIVATE wifiopt_core wifiopt_gui_logic)
 add_test(NAME wifiopt_tests COMMAND wifiopt_tests)
 
 install(TARGETS wifiopt RUNTIME DESTINATION bin)
