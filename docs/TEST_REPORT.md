@@ -296,3 +296,38 @@ Priority 1実装時は、インストール済みWindows SDK 10.0.26100.0の`um\
 - 8秒を超えるDHCP環境、複数WLANアダプタ、DAD遷移中、スリープ復帰直後の実機タイミングは未検証である。
 
 これらは、実Wi-Fi接続を変更しないという安全制約と、Windows位置情報/Application Controlポリシーによる制限のためである。単体テスト、ビルド、コードレビューの成功を実機AP切替やIP確認の成功とはみなしていない。
+
+## Priority 5: GUI拡張（2026-10-14）
+
+### ビルドと単体テスト
+
+- Visual Studio Build Tools 18.6.3、MSVC 19.51.36231、Windows SDK 10.0.26100.0、C++20を使用した。
+- `cmake --build build --config Release --clean-first --parallel`: 全ターゲット成功。出力に警告・エラーなし。
+- `cmake --build build --config Debug --clean-first --parallel`: 全ターゲット成功。出力に警告・エラーなし。
+- Release/Debugの`wifiopt_tests.exe`を直接実行し、両方で`All 22 test groups passed`を確認した。
+- `ctest --test-dir build -C Release --output-on-failure`: 1/1成功、0失敗。
+- `ctest --test-dir build -C Debug --output-on-failure`: 1/1成功、0失敗。
+
+従来21テスト群を維持し、GUI比較判定の1群を追加した。追加テストでは、同一周波数・同一チャネル・数値差16以内のBSSIDを「同一物理APの可能性あり」とすること、周波数/チャネル不一致なら近接BSSIDだけで推定しないこと、どちらの結果にも確実な証拠ではない旨が含まれることを確認した。また、選択スコア最大APの推薦、最強RSSIの説明、全APのBSS Load欠損説明を固定入力で確認した。
+
+### GUIスモークテスト
+
+Release/Debugそれぞれで、分離した既存の`.gui-smoke-release` / `.gui-smoke-debug`を`WIFIOPT_DATA_DIR`へ設定し、`tests/gui_smoke.ps1`からビルド済み`wifiopt_gui.exe`を起動した。テストは`EnumWindows`、`EnumChildWindows`、`GetDlgCtrlID`、`GetWindowLong`を使い、次を機械的に確認した。
+
+| 確認項目 | Release | Debug |
+|---|---|---|
+| メイン、既存詳細、グラフ、比較、診断の各ウィンドウクラスを起動後10秒以内に検出 | 成功 | 成功 |
+| ランキングListView ID 1002を検出し、`LVS_SINGLESEL`が設定されていないことを確認 | 成功 | 成功 |
+| グラフの期間ComboBox ID 1016、出力Button ID 1017を検出 | 成功 | 成功 |
+| 比較の読み取り専用Edit ID 1018を検出 | 成功 | 成功 |
+| 診断のEdit ID 1019、再読込Button ID 1020、出力Button ID 1021を検出 | 成功 | 成功 |
+| 既存SSID ComboBox、Apply、Details、詳細Editを引き続き検出 | 成功 | 成功 |
+| 終了用`WM_COMMAND`送信後15秒以内に終了コード0で終了 | 成功 | 成功 |
+
+新規3ビューは既存Detailsと同様に起動時に非表示で生成されるため、このスモークテストは各トップレベルウィンドウと必要な子コントロールが実際に生成されたことを確認している。グラフの`WM_SHOWWINDOW`/`WM_CLOSE`における`SetTimer`/`KillTimer`、表示中だけサンプルを受理する条件、終了時のワーカーjoinはコードレビューで確認した。接続API、Wi-Fi設定変更、daemon起動は実行していない。
+
+### 確認できた範囲と未確認事項
+
+コードレビューでは、グラフ評価が既存`Optimizer::rank`、診断が既存`BlackBox::load_records`と`query_wlan_events`、JSONエスケープ/Black Box JSONが既存CLI関数を呼び、コアロジックを複製していないことを確認した。グラフバッファは直近1時間・最大600件、期間切替はバッファの時刻フィルタだけ、エクスポートは表示期間内だけである。診断のイベントログ取得不可表示は既存APIのmessage/error codeを保持する。全ウィンドウにDPI換算レイアウトと`WM_DPICHANGED`処理があり、GUIソースは`/utf-8`でコンパイルされた。
+
+一方、実際にマウスで「グラフ」「比較」「診断」や各エクスポートボタンを押した操作、実APからの周期サンプル取得、CSV/JSON保存ダイアログ操作、比較/診断本文の実データ表示は**未確認**である。グラフの線、凡例、日本語文字、列幅、ウィンドウサイズ変更、スクロール、選択操作、トレイとの併用、Per-Monitor DPI v2での複数モニター間移動をスクリーンショットまたは目視では確認していない。これらをスモークテスト成功やビルド成功から外観・操作感の成功とは扱わない。
