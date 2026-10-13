@@ -1,4 +1,16 @@
+# CMake/MSVC build output
 /build/
-/.runtime/
 /.vs/
 *.user
+*.suo
+*.vcxproj.user
+
+# Local runtime and test state
+/.runtime/
+/.gui-smoke-debug/
+/.gui-smoke-release/
+
+# Local tool state
+/.claude/scheduled_tasks.lock
+/.agents
+/.claude
