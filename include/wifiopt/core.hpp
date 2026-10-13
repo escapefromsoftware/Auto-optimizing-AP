@@ -23,6 +23,11 @@ struct InformationElements {
   unsigned vendor_specific_count{};
 };
 
+struct ConnectionHistorySample {
+  std::int64_t unix_time{};
+  bool success{};
+};
+
 struct AccessPoint {
   std::string ssid;
   std::string bssid;
@@ -49,6 +54,9 @@ struct AccessPoint {
   unsigned history_attempts{};
   unsigned history_successes{};
   unsigned recent_failures{};
+  // Kept separate from the aggregate counters so the default score remains
+  // byte-for-byte compatible. Used only by an explicitly enabled decay policy.
+  std::vector<ConnectionHistorySample> history_samples;
 };
 
 struct ScoreResult {
@@ -73,6 +81,8 @@ struct ScorePolicy {
   double connection_history_neutral_score{8.5};
   double current_ap_bonus{8.0};
   double recent_failure_penalty{7.0};
+  std::optional<double> connection_history_half_life_days;
+  std::optional<std::int64_t> history_reference_unix;
 };
 
 struct ConnectionRecord {
@@ -84,6 +94,7 @@ struct ConnectionRecord {
   std::uint32_t error_code{};
   std::string detail;
   std::optional<bool> ip_address_verified;
+  std::optional<std::uint64_t> duration_ms;
 };
 
 struct AutoConfig {
@@ -92,6 +103,12 @@ struct AutoConfig {
   double min_improvement{12.0};
   unsigned cooldown_seconds{600};
   std::string target_ssid{"AP-TUT5"};
+  std::string mode{"normal"};
+  double gaming_additional_margin{8.0};
+  double call_additional_margin{15.0};
+  bool process_detection_enabled{false};
+  std::vector<std::string> call_process_names{
+      "Discord.exe", "Teams.exe", "ms-teams.exe", "Zoom.exe"};
 };
 
 struct DaemonState {

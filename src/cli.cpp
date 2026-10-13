@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <ctime>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -346,6 +347,14 @@ std::vector<AccessPoint> parse_scan_json_document(std::string_view text) {
     ap.history_attempts = static_cast<unsigned>(number_member(item, "history_attempts", 0));
     ap.history_successes = static_cast<unsigned>(number_member(item, "history_successes", 0));
     ap.recent_failures = static_cast<unsigned>(number_member(item, "recent_failures", 0));
+    if (const auto* samples = member(item, "history_samples")) {
+      for (const auto& history_value : array(*samples, "history_samples")) {
+        const auto& sample = object(history_value, "history sample");
+        ap.history_samples.push_back({
+            static_cast<std::int64_t>(number_member(sample, "unix_time", 0)),
+            bool_member(sample, "success", false)});
+      }
+    }
     if (const auto* load = member(item, "bss_load"); load && !std::holds_alternative<std::nullptr_t>(load->value)) {
       const auto& bss = object(*load, "bss_load");
       ap.bss_load = BssLoad{
@@ -383,12 +392,19 @@ ScorePolicy parse_score_policy_json(std::string_view text) {
   policy.connection_history_neutral_score = number_member(root, "connection_history_neutral", policy.connection_history_neutral_score);
   policy.current_ap_bonus = number_member(root, "current_ap_bonus", policy.current_ap_bonus);
   policy.recent_failure_penalty = number_member(root, "recent_failure_penalty", policy.recent_failure_penalty);
+  optional_number(root, "connection_history_half_life_days",
+                  policy.connection_history_half_life_days);
+  optional_number(root, "history_reference_unix", policy.history_reference_unix);
   const double values[]{policy.rssi_weight, policy.signal_quality_weight, policy.bss_load_weight,
       policy.bss_load_neutral_score, policy.channel_interference_weight, policy.channel_interference_decay,
       policy.connection_history_weight, policy.connection_history_neutral_score,
       policy.current_ap_bonus, policy.recent_failure_penalty};
   if (std::any_of(std::begin(values), std::end(values), [](double value) { return value < 0.0 || value > 1000.0; }))
     throw std::runtime_error("weights must be between 0 and 1000");
+  if (policy.connection_history_half_life_days &&
+      (*policy.connection_history_half_life_days <= 0.0 ||
+       *policy.connection_history_half_life_days > 36500.0))
+    throw std::runtime_error("connection_history_half_life_days must be greater than 0 and at most 36500");
   return policy;
 }
 
@@ -412,6 +428,8 @@ HistoryStats compute_history_stats(const std::vector<ConnectionRecord>& rows) {
   HistoryStats stats;
   stats.samples = rows.size();
   std::string previous;
+  std::uint64_t total_duration_ms = 0;
+  std::size_t duration_samples = 0;
   for (const auto& row : rows) {
     if (!stats.first_unix || row.unix_time < *stats.first_unix) stats.first_unix = row.unix_time;
     if (!stats.last_unix || row.unix_time > *stats.last_unix) stats.last_unix = row.unix_time;
@@ -423,12 +441,25 @@ HistoryStats compute_history_stats(const std::vector<ConnectionRecord>& rows) {
       if (row.success) ++ap.successes;
     }
     if (!row.success) ++stats.error_counts[row.error_code];
+    const std::time_t timestamp = static_cast<std::time_t>(row.unix_time);
+    std::tm local{};
+    if (localtime_s(&local, &timestamp) == 0 && local.tm_hour >= 0 && local.tm_hour < 24) {
+      auto& band = stats.by_time_band[static_cast<std::size_t>(local.tm_hour / 6)];
+      ++band.attempts;
+      if (row.success) ++band.successes;
+    }
+    if (row.duration_ms) {
+      total_duration_ms += *row.duration_ms;
+      ++duration_samples;
+    }
     if (valid_bssid(row.actual_bssid)) {
       const auto actual = normalize_bssid(row.actual_bssid);
       if (!previous.empty() && actual != previous) ++stats.ap_switches;
       previous = actual;
     }
   }
+  if (duration_samples)
+    stats.average_connection_time_ms = static_cast<double>(total_duration_ms) / duration_samples;
   return stats;
 }
 

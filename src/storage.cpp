@@ -96,6 +96,21 @@ std::optional<bool> json_bool(const std::string& text, const std::string& key) {
   return std::nullopt;
 }
 
+std::optional<std::vector<std::string>> json_string_array(
+    const std::string& text, const std::string& key) {
+  const std::regex array_re("\\\"" + key + "\\\"\\s*:\\s*\\[([^\\]]*)\\]");
+  std::smatch array_match;
+  if (!std::regex_search(text, array_match, array_re)) return std::nullopt;
+  const std::string body = array_match[1].str();
+  const std::regex item_re("\\\"((?:\\\\.|[^\\\"\\\\])*)\\\"");
+  std::vector<std::string> values;
+  for (auto it = std::sregex_iterator(body.begin(), body.end(), item_re);
+       it != std::sregex_iterator(); ++it) {
+    values.push_back(unescape_field((*it)[1].str()));
+  }
+  return values;
+}
+
 } // namespace
 
 void atomic_write_file(const std::filesystem::path& path, std::string_view text) {
@@ -157,6 +172,14 @@ AutoConfig Storage::load_config() const {
   if (auto v = json_number(text, "min_improvement")) c.min_improvement = std::clamp(*v, 1.0, 50.0);
   if (auto v = json_number(text, "cooldown_seconds")) c.cooldown_seconds = static_cast<unsigned>(std::clamp(*v, 30.0, 86400.0));
   if (auto v = json_string(text, "target_ssid")) c.target_ssid = *v;
+  if (auto v = json_string(text, "mode"); v &&
+      (*v == "normal" || *v == "gaming" || *v == "call" || *v == "manual")) c.mode = *v;
+  if (auto v = json_number(text, "gaming_additional_margin"))
+    c.gaming_additional_margin = std::clamp(*v, 0.0, 50.0);
+  if (auto v = json_number(text, "call_additional_margin"))
+    c.call_additional_margin = std::clamp(*v, 0.0, 50.0);
+  if (auto v = json_bool(text, "process_detection_enabled")) c.process_detection_enabled = *v;
+  if (auto v = json_string_array(text, "call_process_names")) c.call_process_names = std::move(*v);
   return c;
 }
 
@@ -166,7 +189,18 @@ void Storage::save_config(const AutoConfig& c) const {
       << ",\n  \"interval_seconds\": " << c.interval_seconds
       << ",\n  \"min_improvement\": " << c.min_improvement
       << ",\n  \"cooldown_seconds\": " << c.cooldown_seconds
-      << ",\n  \"target_ssid\": \"" << json_escape(c.target_ssid) << "\"\n}\n";
+      << ",\n  \"target_ssid\": \"" << json_escape(c.target_ssid) << "\""
+      << ",\n  \"mode\": \"" << json_escape(c.mode) << "\""
+      << ",\n  \"gaming_additional_margin\": " << c.gaming_additional_margin
+      << ",\n  \"call_additional_margin\": " << c.call_additional_margin
+      << ",\n  \"process_detection_enabled\": "
+      << (c.process_detection_enabled ? "true" : "false")
+      << ",\n  \"call_process_names\": [";
+  for (std::size_t i = 0; i < c.call_process_names.size(); ++i) {
+    if (i) out << ", ";
+    out << '\"' << json_escape(c.call_process_names[i]) << '\"';
+  }
+  out << "]\n}\n";
   atomic_write_file(root_ / "config.json", out.str());
 }
 
@@ -202,6 +236,8 @@ void Storage::append_history(const ConnectionRecord& r) const {
       << '\t' << escape_field(normalize_bssid(r.actual_bssid)) << '\t' << (r.success ? 1 : 0)
       << '\t' << r.error_code << '\t' << escape_field(r.detail) << '\t';
   if (r.ip_address_verified) out << (*r.ip_address_verified ? 1 : 0);
+  out << '\t';
+  if (r.duration_ms) out << *r.duration_ms;
   out << '\n';
 }
 
@@ -211,16 +247,18 @@ std::vector<ConnectionRecord> Storage::load_history(std::size_t limit) const {
   std::string line;
   while (std::getline(in, line)) {
     const auto f = split_tabs(line);
-    if (f.size() != 7 && f.size() != 8) continue;
+    if (f.size() != 7 && f.size() != 8 && f.size() != 9) continue;
     try {
       std::optional<bool> ip_address_verified;
-      if (f.size() == 8 && !f[7].empty()) {
+      if (f.size() >= 8 && !f[7].empty()) {
         if (f[7] != "0" && f[7] != "1") continue;
         ip_address_verified = f[7] == "1";
       }
+      std::optional<std::uint64_t> duration_ms;
+      if (f.size() == 9 && !f[8].empty()) duration_ms = std::stoull(f[8]);
       rows.push_back({std::stoll(f[0]), f[1], f[2], f[3], f[4] == "1",
                       static_cast<std::uint32_t>(std::stoul(f[5])), f[6],
-                      ip_address_verified});
+                      ip_address_verified, duration_ms});
     } catch (...) { /* Ignore damaged individual history rows. */ }
   }
   if (rows.size() > limit) rows.erase(rows.begin(), rows.end() - static_cast<std::ptrdiff_t>(limit));
@@ -236,6 +274,7 @@ void Storage::enrich_with_history(std::vector<AccessPoint>& aps) const {
       ++ap.history_attempts;
       if (it->success) ++ap.history_successes;
       else if (ap.recent_failures < 3) ++ap.recent_failures;
+      ap.history_samples.push_back({it->unix_time, it->success});
     }
   }
 }

@@ -51,6 +51,7 @@ void help() {
       "  wifiopt watch --interval SECONDS|Ns|Nm [--duration Ns|Nm|Nh|Nd] [--ssid SSID] [--format text|ndjson]\n"
       "  wifiopt auto on|off|status [--ssid SSID]\n"
       "  wifiopt target [SSID]\n"
+      "  wifiopt mode [normal|gaming|call|manual]\n"
       "\nCommon output flags: --quiet --no-color\n"
       "The default SSID is AP-TUT5. Only saved Windows Wi-Fi profiles are used.\n";
 }
@@ -209,12 +210,23 @@ void print_history_stats_text(const HistoryStats& stats) {
   if (stats.first_unix) std::cout << *stats.first_unix << " to " << *stats.last_unix;
   else std::cout << "not available";
   std::cout << "\nSamples: " << stats.samples << "\nAP switches: " << stats.ap_switches << "\n"
-            << "Average connection time: unavailable (not recorded)\n";
+            << "Average connection time: ";
+  if (stats.average_connection_time_ms)
+    std::cout << std::fixed << std::setprecision(1) << *stats.average_connection_time_ms << " ms\n";
+  else std::cout << "unavailable (not recorded)\n";
   std::cout << "Success rate by BSSID:\n";
   if (stats.by_bssid.empty()) std::cout << "  (none)\n";
   for (const auto& [bssid, value] : stats.by_bssid) {
     const double percent = value.attempts ? value.successes * 100.0 / value.attempts : 0.0;
     std::cout << "  " << bssid << ": " << value.successes << '/' << value.attempts
+              << " (" << std::fixed << std::setprecision(1) << percent << "%)\n";
+  }
+  constexpr const char* bands[]{"00:00-05:59", "06:00-11:59", "12:00-17:59", "18:00-23:59"};
+  std::cout << "Success rate by local time band:\n";
+  for (std::size_t i = 0; i < stats.by_time_band.size(); ++i) {
+    const auto& value = stats.by_time_band[i];
+    const double percent = value.attempts ? value.successes * 100.0 / value.attempts : 0.0;
+    std::cout << "  " << bands[i] << ": " << value.successes << '/' << value.attempts
               << " (" << std::fixed << std::setprecision(1) << percent << "%)\n";
   }
   std::cout << "Error code frequency:\n";
@@ -229,11 +241,23 @@ std::string history_stats_json(const HistoryStats& stats) {
   out << ",\"observation_end_unix\":";
   if (stats.last_unix) out << *stats.last_unix; else out << "null";
   out << ",\"samples\":" << stats.samples << ",\"ap_switches\":" << stats.ap_switches
-      << ",\"average_connection_time_ms\":null,\"by_bssid\":[";
+      << ",\"average_connection_time_ms\":";
+  if (stats.average_connection_time_ms) out << *stats.average_connection_time_ms;
+  else out << "null";
+  out << ",\"by_bssid\":[";
   bool first = true;
   for (const auto& [bssid, value] : stats.by_bssid) {
     if (!first) out << ','; first = false;
     out << "{\"bssid\":\"" << bssid << "\",\"attempts\":" << value.attempts
+        << ",\"successes\":" << value.successes << ",\"success_rate\":"
+        << (value.attempts ? value.successes * 1.0 / value.attempts : 0.0) << '}';
+  }
+  constexpr const char* bands[]{"00:00-05:59", "06:00-11:59", "12:00-17:59", "18:00-23:59"};
+  out << "],\"by_time_band\":[";
+  for (std::size_t i = 0; i < stats.by_time_band.size(); ++i) {
+    if (i) out << ',';
+    const auto& value = stats.by_time_band[i];
+    out << "{\"local_time\":\"" << bands[i] << "\",\"attempts\":" << value.attempts
         << ",\"successes\":" << value.successes << ",\"success_rate\":"
         << (value.attempts ? value.successes * 1.0 / value.attempts : 0.0) << '}';
   }
@@ -445,6 +469,17 @@ int main(int argc, char** argv) {
       return 0;
     }
 
+    if (command == "mode") {
+      if (argc == 2) { std::cout << config.mode << "\n"; return 0; }
+      if (argc != 3) { std::cerr << "Usage: wifiopt mode [normal|gaming|call|manual]\n"; return 2; }
+      const auto mode = parse_optimization_mode(argv[2]);
+      if (!mode) { std::cerr << "Mode must be normal, gaming, call, or manual\n"; return 2; }
+      config.mode = std::string(optimization_mode_name(*mode));
+      storage.save_config(config);
+      std::cout << "Optimization mode saved: " << config.mode << "\n";
+      return 0;
+    }
+
     config.target_ssid = option_value(argc, argv, "--ssid", config.target_ssid);
     if (command == "daemon") return run_daemon(self_path(), storage);
     if (command == "simulate") return run_simulate(argc, argv, quiet);
@@ -477,8 +512,9 @@ int main(int argc, char** argv) {
       if (action == "status") {
         const auto state = storage.load_daemon_state(); const bool running = process_is_running(state.pid);
         std::cout << "Configured: " << (config.enabled ? "ON" : "OFF")
-                  << "\nMonitor process: " << (running ? "running" : "not running")
-                  << "\nState: " << state.status << "\nSSID: " << state.ssid << "\nBSSID: " << state.bssid
+                   << "\nMonitor process: " << (running ? "running" : "not running")
+                   << "\nMode: " << config.mode
+                   << "\nState: " << state.status << "\nSSID: " << state.ssid << "\nBSSID: " << state.bssid
                   << "\nLast detail: " << state.detail << "\n";
         if (config.enabled && !running) std::cout << "Warning: setting is ON but monitor is not running; run 'wifiopt auto on' to restart it.\n";
         return running == config.enabled ? 0 : 1;
@@ -503,6 +539,13 @@ int main(int argc, char** argv) {
           for (const auto& [bssid, value] : stats.by_bssid)
             std::cout << "{\"schema_version\":1,\"command\":\"history\",\"type\":\"bssid_stats\",\"bssid\":\""
                       << bssid << "\",\"attempts\":" << value.attempts << ",\"successes\":" << value.successes << "}\n";
+          constexpr const char* bands[]{"00:00-05:59", "06:00-11:59", "12:00-17:59", "18:00-23:59"};
+          for (std::size_t i = 0; i < stats.by_time_band.size(); ++i) {
+            const auto& value = stats.by_time_band[i];
+            std::cout << "{\"schema_version\":1,\"command\":\"history\",\"type\":\"time_band_stats\",\"local_time\":\""
+                      << bands[i] << "\",\"attempts\":" << value.attempts
+                      << ",\"successes\":" << value.successes << "}\n";
+          }
         } else {
           std::cout << "record_type,key,attempts,successes,value\n"
                     << "summary,samples,,," << stats.samples << "\n"
@@ -514,6 +557,12 @@ int main(int argc, char** argv) {
           for (const auto& [bssid, value] : stats.by_bssid)
             std::cout << "bssid," << bssid << ',' << value.attempts << ',' << value.successes << ','
                       << (value.attempts ? value.successes * 1.0 / value.attempts : 0.0) << '\n';
+          constexpr const char* bands[]{"00:00-05:59", "06:00-11:59", "12:00-17:59", "18:00-23:59"};
+          for (std::size_t i = 0; i < stats.by_time_band.size(); ++i) {
+            const auto& value = stats.by_time_band[i];
+            std::cout << "time_band," << bands[i] << ',' << value.attempts << ',' << value.successes << ','
+                      << (value.attempts ? value.successes * 1.0 / value.attempts : 0.0) << '\n';
+          }
           for (const auto& [code, count] : stats.error_counts)
             std::cout << "error," << code << ",,," << count << '\n';
         }
@@ -620,11 +669,16 @@ int main(int argc, char** argv) {
       if (argc < 3 || !valid_bssid(argv[2])) { std::cerr << "A valid BSSID is required\n"; return 2; }
       const auto before = wlan.status();
       blackbox.observe(make_wifi_observation(before));
-      const auto r = wlan.connect_bssid(config.target_ssid, argv[2]); const bool success = r.success && r.desired_bssid_matched;
+      const auto connect_started = std::chrono::steady_clock::now();
+      const auto r = wlan.connect_bssid(config.target_ssid, argv[2]);
+      const auto connect_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - connect_started);
+      const bool success = r.success && r.desired_bssid_matched;
       const auto after = wlan.status();
       const ConnectionRecord connection_record{
           unix_now(), config.target_ssid, r.requested_bssid, r.actual_bssid,
-          success, r.api_error ? r.api_error : r.reason_code, r.detail};
+          success, r.api_error ? r.api_error : r.reason_code, r.detail,
+          std::nullopt, static_cast<std::uint64_t>(connect_duration.count())};
       storage.append_history(connection_record);
       blackbox.record_connection(connection_record, make_wifi_observation(after));
       blackbox.observe(make_wifi_observation(after), true);
@@ -634,7 +688,7 @@ int main(int argc, char** argv) {
     if (command == "optimize") {
       const auto format = requested_format(argc, argv); if (!format || (*format != OutputFormat::text && *format != OutputFormat::json)) return invalid_format();
       const bool dry_run = has_option(argc, argv, "--dry-run"); const bool explain = has_option(argc, argv, "--explain");
-      const auto r = optimizer.optimize_once(wlan, config, true, dry_run);
+      const auto r = optimizer.optimize_once(wlan, config, false, dry_run);
       if (!quiet) {
         if (*format == OutputFormat::json) {
           std::cout << "{\"schema_version\":1,\"command\":\"optimize\",\"data\":{\"dry_run\":" << (dry_run ? "true" : "false")
@@ -682,7 +736,7 @@ int main(int argc, char** argv) {
             std::cout << "\n";
           }
           if (explain) {
-            std::cout << "Threshold: " << config.min_improvement << "\nImprovement: ";
+            std::cout << "Threshold: " << r.threshold << "\nImprovement: ";
             if (r.improvement) std::cout << *r.improvement; else std::cout << "not applicable";
             std::cout << "\nCooldown: inactive (one-shot evaluation has no persisted switch timer)\n";
             if (r.recommended) for (const auto& reason : r.recommended->scoring.reasons) std::cout << "  - " << reason << "\n";

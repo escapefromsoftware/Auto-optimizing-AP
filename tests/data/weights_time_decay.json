@@ -1,0 +1,13 @@
+{
+  "signal_rssi": 0,
+  "signal_quality": 0,
+  "bss_load": 0,
+  "bss_load_neutral": 0,
+  "channel_interference": 0,
+  "connection_history": 100,
+  "connection_history_neutral": 50,
+  "current_ap_bonus": 0,
+  "recent_failure_penalty": 0,
+  "connection_history_half_life_days": 7,
+  "history_reference_unix": 1700000000
+}

@@ -64,8 +64,10 @@ wifiopt scan --format csv
 - BSSID別の成功数、試行数、成功率
 - 失敗したエラーコード別件数
 - 有効な `actual_bssid` が直前記録から変わった回数
+- ローカル時刻の4時間帯（0～5時、6～11時、12～17時、18～23時）別の成功数、試行数、成功率
+- `duration_ms`がある新規履歴の平均接続所要時間
 
-接続所要時間は履歴に記録されていないため、テキストでは `unavailable (not recorded)`、JSONでは `average_connection_time_ms: null` です。
+旧7列・8列履歴には接続所要時間がないため、所要時間付きサンプルが1件もない場合は従来どおりテキストで`unavailable (not recorded)`、JSONで`average_connection_time_ms: null`です。
 
 ### `blackbox [--since 30m|24h|7d] [--format text|json]`
 
@@ -110,11 +112,13 @@ wifiopt diagnose --report --since 7d --format json
   "connection_history": 17,
   "connection_history_neutral": 8.5,
   "current_ap_bonus": 8,
-  "recent_failure_penalty": 7
+  "recent_failure_penalty": 7,
+  "connection_history_half_life_days": 7,
+  "history_reference_unix": 1700000000
 }
 ```
 
-指定していないキーは既定値です。値は0以上1000以下の有限数に限定されます。
+`connection_history_half_life_days`を省略すると、接続履歴は従来と完全に同じ整数集計とLaplace平滑化です。指定時だけ、入力APの`history_samples`（各要素は`unix_time`と`success`）へ指数時間減衰を適用します。`history_reference_unix`は再現可能な比較用の任意値で、省略時は現在時刻です。個別サンプルのない通常のscan JSONでは従来集計へフォールバックします。半減期は0より大きく36500日以下、その他の重みは0以上1000以下の有限数です。リポジトリ同梱の`tests/data/scan_sample.json`と`tests/data/weights_time_decay.json`は`--compare`でこの代替方式をオフライン比較できます。
 
 ### `watch --interval SECONDS|Ns|Nm [--duration Ns|Nm|Nh|Nd] [--format text|ndjson] [--ssid SSID]`
 
@@ -122,11 +126,22 @@ wifiopt diagnose --report --since 7d --format json
 
 ### `auto on|off|status [--ssid SSID]`
 
-自動最適化daemonを開始、停止、照会します。`auto on` は実際の接続変更を行い得ます。
+自動最適化daemonを開始、停止、照会します。`auto on` はmanual以外のモードで実際の接続変更を行い得ます。`auto status`は従来項目に加えて現在のモードを表示します。
 
 ### `target [SSID]`
 
 引数なしで保存対象SSIDを表示し、引数ありで `target_ssid` だけを更新します。
+
+### `mode [normal|gaming|call|manual]`
+
+引数なしで保存済み動作モードを表示し、引数ありで`mode`だけを更新します。`enabled`やSSID、間隔、閾値、クールダウン等は変更しません。
+
+- `normal`: 従来のヒステリシス閾値を使用。
+- `gaming`: 設定されたgaming追加マージンを閾値へ加算。
+- `call`: gamingより慎重なcall追加マージンを閾値へ加算。
+- `manual`: daemonは観測・状態記録を続けるが接続を変更しない。明示的な`optimize`/`connect`は実行可能。
+
+プロセス検出はconfig JSONの`process_detection_enabled`を`true`へ明示変更した場合だけ有効です。`call_process_names`は実行ファイル名のJSON配列で、既定は`Discord.exe`、`Teams.exe`、`ms-teams.exe`、`Zoom.exe`です。一致中は保存モードを変更せず、その評価周期だけcall相当になります。無効時はプロセス列挙を行いません。
 
 ## JSONスキーマ
 

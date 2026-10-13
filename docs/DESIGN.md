@@ -9,7 +9,7 @@
 - `main`: CLI入力・表示とバックグラウンドプロセス制御
 - `gui_main`: Win32 GUI、ListView、履歴ウィンドウ、システムトレイ、非同期操作の調停
 
-`target_ssid`は自動最適化の`enabled`状態とは独立した永続設定である。CLIの`target`コマンドとGUIの「Apply」は、操作時に`Storage::load_config()`で最新設定を読み直し、`target_ssid`だけを変更して`Storage::save_config()`へ渡す。評価間隔、改善幅、クールダウン、ON/OFF状態は同じ値を保持する。各コマンドの`--ssid`は一時上書きであり、`target`またはGUIの適用操作を除いて対象SSIDを永続変更しない。
+`target_ssid`と`mode`は自動最適化の`enabled`状態とは独立した永続設定である。CLIの`target`、`mode`、GUIの「Apply」は、操作時に`Storage::load_config()`で最新設定を読み直し、対象フィールドだけを変更して`Storage::save_config()`へ渡す。評価間隔、改善幅、クールダウン、ON/OFF状態など他の値は保持する。各コマンドの`--ssid`は一時上書きであり、`target`またはGUIの適用操作を除いて対象SSIDを永続変更しない。
 
 `WlanOpenHandle`、`WlanEnumInterfaces`、`WlanScan`、`WlanGetNetworkBssList`、`WlanQueryInterface`、`WlanConnect`、`WlanRegisterNotification`、`WlanFreeMemory`を使用する。WLAN APIが割り当てた領域はカスタムdeleter付き`unique_ptr`、WLANハンドルとプロセス/Mutexハンドルは所有者のデストラクタまたは全終了経路で解放する。
 
@@ -36,7 +36,9 @@ IEは `[element-id, length, payload]` のTLVとして残長を毎回確認する
 | 直近失敗 | 減点 | 1回7点、最大21点 |
 | 現在AP | 加点 | 切替コスト/安定性を表す8点 |
 
-Station Countは表示だけに用い、負荷へ変換しない。遅延は本版では測定しない。同点は現在AP、RSSI、BSSID辞書順の順で決定し、毎回同じ結果になる。
+Station Countは表示だけに用い、負荷へ変換しない。同点は現在AP、RSSI、BSSID辞書順の順で決定し、毎回同じ結果になる。
+
+履歴点は既定では従来の整数試行数に対するLaplace平滑化をそのまま使う。`ScorePolicy::connection_history_half_life_days`を明示した場合だけ、各履歴試行へ`2^(-経過日数/半減期日数)`を掛けた重み付き成功数・試行数を同じ平滑化式へ入れる。未指定時は時間参照も行わず、従来の得点と理由文字列を維持する。オフライン再現用には重みJSONの`history_reference_unix`で評価時刻を固定でき、省略時は現在時刻を使う。入力に個別の`history_samples`がない場合は、半減期が指定されても安全に従来の集計値へフォールバックする。これは統計的平滑化であり、機械学習モデルではない。将来モデルを導入する場合も、特徴量生成と推論を`ScorePolicy`境界の外へ分離し、既定の決定的スコアを互換経路として残す。
 
 ## 接続と復旧
 
@@ -44,7 +46,7 @@ Station Countは表示だけに用い、負荷へ変換しない。遅延は本�
 
 自動最適化のClosed-loop Optimizationは、切替要求、実BSSID一致確認、対象WLANインターフェイスのIPv4確認、切替前後のRSSI/Signal Quality比較、履歴/Black Box記録の順で進む。IPv4確認はインターフェイスGUIDをLUIDへ変換し、`GetAdaptersAddresses(AF_INET)`のユニキャスト一覧だけを500 ms間隔、最大約8秒読み取る。未割当、0/8、loopback、APIPA（169.254/16）、multicast以上は有効なIPv4とみなさない。外部パケットは送信しない。自動切替の成功扱いは、WLAN通知成功、実BSSID一致、有効IPv4確認の3条件をすべて満たした場合だけである。
 
-BSSID不一致またはIPv4確認失敗時、開始前が同じSSIDへの接続なら元BSSIDへの復帰を1回だけ試す。復帰側も実BSSIDとIPv4を確認するが、接続要求の再試行は増やさず、無限再試行はない。各試行の希望/実BSSID、時刻、APIまたはWLAN reason code、説明、実施した場合のIPv4確認結果を履歴とBlack Boxへ保存する。履歴TSVの8列目はオプショナルなIPv4確認結果で、旧7列行も継続して読み込む。
+BSSID不一致またはIPv4確認失敗時、開始前が同じSSIDへの接続なら元BSSIDへの復帰を1回だけ試す。復帰側も実BSSIDとIPv4を確認するが、接続要求の再試行は増やさず、無限再試行はない。各試行の希望/実BSSID、時刻、APIまたはWLAN reason code、説明、実施した場合のIPv4確認結果を履歴とBlack Boxへ保存する。`connect_bssid`呼出しの直前・直後を`steady_clock`で計測し、要求からWLAN通知完了またはタイムアウトまでを`duration_ms`として保存する。IP確認待ち時間は含めない。履歴TSVの8列目はオプショナルなIPv4確認結果、9列目はオプショナルな接続所要時間で、旧7列・8列行も継続して読み込む。
 
 `optimize --dry-run`はランキングとヒステリシス判定後、接続要求より前に終了するため、IPv4確認も行わない。手動`connect`とGUIの手動接続は従来どおりWLAN通知と実BSSIDだけを判定し、この検証ループの対象外である。
 
@@ -53,6 +55,14 @@ BSSID不一致またはIPv4確認失敗時、開始前が同じSSIDへの接続�
 `auto on` は同じexeを`daemon`モードで非表示起動する。名前付きMutexで多重起動を防ぎ、PID・heartbeat・SSID・BSSID・直近結果をJSONに保存する。OFF設定は500 ms単位の待機より優先して確認され、OFFは切断APIを呼ばない。切替中のNative Wi-Fi呼び出しはOS APIの完了/タイムアウトまでは同期的であり、その後OFFを反映する。
 
 クールダウンは監視プロセス内で管理し、改善幅12点未満なら切り替えない。プロセス停止をPIDで実測するため、保存されたON値だけで稼働中とは表示しない。GUIも同じJSON状態とCLI相当の制御手順を利用する。
+
+### 動作モードとプロセス検出
+
+`normal`は従来の`min_improvement`をそのまま使う。`gaming`と`call`は`min_improvement`自体を書き換えず、それぞれ`gaming_additional_margin`（既定8点）、`call_additional_margin`（既定15点）を評価時の閾値へ加える。`manual`はdaemonの観測、Black Box、状態保存を継続しながら`optimize_once`をdry-runとして実行するため、`connect_bssid`を呼ばない。明示的な`wifiopt optimize`はユーザー操作としてmanual制約を解除してnormal閾値を使い、`connect`も従来どおりである。`enabled`はdaemonを動かすかという従来の意味を維持し、モードとは独立する。
+
+`process_detection_enabled`は既定falseである。false時はプロセスAPIを一切呼ばない。true時だけ、daemonの既存評価周期内で`CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)`、`Process32FirstW`、`Process32NextW`を1回実行し、`call_process_names`に設定された実行ファイル名と大文字小文字を無視して照合する。一致中は保存モードを書き換えず、その評価だけ`call`閾値を使う。取得するのは`PROCESSENTRY32W::szExeFile`だけで、ウィンドウ、通信、コマンドライン、キーストロークは取得しない。列挙失敗時は、その評価をmanual相当のdry-runへ落とし、Windowsエラーコードをdaemon stateの`detail`へ保存する。
+
+履歴統計はUnix時刻をローカル時刻へ変換し、0～5時、6～11時、12～17時、18～23時の4帯で成功数・試行数・成功率を集計する。これは記録済みの接続試行だけを母数とする。
 
 ## Win32 GUI
 

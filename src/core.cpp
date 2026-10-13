@@ -1,6 +1,7 @@
 #include "wifiopt/core.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <iomanip>
@@ -146,15 +147,38 @@ ScoreResult score_access_point(const AccessPoint& ap, const ScorePolicy& policy)
   result.quality_score = signal + load + overlap;
 
   double history = policy.connection_history_neutral_score;
-  if (ap.history_attempts > 0) {
+  bool decayed_history = false;
+  double weighted_attempts = 0.0;
+  double weighted_successes = 0.0;
+  if (policy.connection_history_half_life_days && !ap.history_samples.empty()) {
+    const auto reference = policy.history_reference_unix.value_or(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    const double half_life_seconds = *policy.connection_history_half_life_days * 86400.0;
+    for (const auto& sample : ap.history_samples) {
+      const double age = static_cast<double>(std::max<std::int64_t>(0, reference - sample.unix_time));
+      const double weight = std::exp2(-age / half_life_seconds);
+      weighted_attempts += weight;
+      if (sample.success) weighted_successes += weight;
+    }
+    const double smoothed = (weighted_successes + 1.0) / (weighted_attempts + 2.0);
+    history = policy.connection_history_weight * smoothed;
+    decayed_history = true;
+  } else if (ap.history_attempts > 0) {
     const double smoothed = (ap.history_successes + 1.0) / (ap.history_attempts + 2.0);
     history = policy.connection_history_weight * smoothed;
   }
   result.score += history;
   {
-    std::ostringstream s; s << "connection history " << ap.history_successes << "/" << ap.history_attempts
-                            << " => " << std::fixed << std::setprecision(1) << history << "/"
-                            << policy_number(policy.connection_history_weight);
+    std::ostringstream s;
+    if (decayed_history) {
+      s << "time-decayed connection history " << std::fixed << std::setprecision(2)
+        << weighted_successes << "/" << weighted_attempts;
+    } else {
+      s << "connection history " << ap.history_successes << "/" << ap.history_attempts;
+    }
+    s << " => " << std::fixed << std::setprecision(1) << history << "/"
+      << policy_number(policy.connection_history_weight);
     result.reasons.push_back(s.str());
   }
 

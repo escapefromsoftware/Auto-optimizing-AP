@@ -43,6 +43,10 @@ GUIと`wifiopt.exe`は同じディレクトリに配置してください。GUI�
 .\build\Release\wifiopt.exe target
 .\build\Release\wifiopt.exe target TestNetwork123
 
+# 動作モードを表示・変更（enabledとは独立）
+.\build\Release\wifiopt.exe mode
+.\build\Release\wifiopt.exe mode gaming
+
 # 全SSIDのBSSを表示
 .\build\Release\wifiopt.exe scan
 
@@ -102,6 +106,8 @@ GUIと`wifiopt.exe`は同じディレクトリに配置してください。GUI�
 - 既定の評価間隔: 60秒
 - 最低改善幅（ヒステリシス）: 12点
 - 切替後クールダウン: 600秒
+- 動作モード: normal（gaming/callは追加マージン、manualは監視・記録のみ）
+- 通話アプリのプロセス名検出: 既定OFF（設定で明示的に有効化）
 - `auto off` は現在の接続を切らず、監視だけを止める
 - 設定がONでもプロセスが停止していれば `auto status` が不整合を警告する
 - Windows起動時の自動実行は本版では設定しない

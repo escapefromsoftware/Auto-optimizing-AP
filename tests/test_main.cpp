@@ -3,6 +3,7 @@
 #include "wifiopt/cli.hpp"
 #include "wifiopt/eventlog.hpp"
 #include "wifiopt/gui_logic.hpp"
+#include "wifiopt/optimizer.hpp"
 #include "wifiopt/storage.hpp"
 #include "wifiopt/wlan_client.hpp"
 
@@ -11,6 +12,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -204,20 +206,25 @@ void test_old_history_format_remains_readable() {
     Storage storage(root);
     {
       std::ofstream history(root / "history.tsv", std::ios::binary);
-      history << "123\tAP-TUT5\t98:8F:00:41:42:83\t98:8F:00:41:42:83\t1\t0\tlegacy row\n";
+      history << "123\tAP-TUT5\t98:8F:00:41:42:83\t98:8F:00:41:42:83\t1\t0\tlegacy row\n"
+              << "124\tAP-TUT5\t98:8F:00:41:42:84\t98:8F:00:41:42:84\t1\t0\teight columns\t1\n";
     }
     auto rows = storage.load_history();
-    CHECK(rows.size() == 1);
+    CHECK(rows.size() == 2);
     CHECK(rows[0].detail == "legacy row");
     CHECK(!rows[0].ip_address_verified.has_value());
+    CHECK(!rows[0].duration_ms.has_value());
+    CHECK(rows[1].ip_address_verified.has_value() && *rows[1].ip_address_verified);
+    CHECK(!rows[1].duration_ms.has_value());
 
-    storage.append_history({124, "AP-TUT5", "98:8F:00:41:42:84",
-                            "98:8F:00:41:42:84", false, 0,
-                            "IPv4 verification failed", std::optional<bool>{false}});
+    storage.append_history({125, "AP-TUT5", "98:8F:00:41:42:85",
+                            "98:8F:00:41:42:85", false, 0,
+                            "IPv4 verification failed", std::optional<bool>{false}, 4321});
     rows = storage.load_history();
-    CHECK(rows.size() == 2);
-    CHECK(rows[1].ip_address_verified.has_value());
-    CHECK(!*rows[1].ip_address_verified);
+    CHECK(rows.size() == 3);
+    CHECK(rows[2].ip_address_verified.has_value());
+    CHECK(!*rows[2].ip_address_verified);
+    CHECK(rows[2].duration_ms == 4321);
   }
   std::filesystem::remove_all(root);
 }
@@ -230,6 +237,8 @@ void test_storage_initial_off_and_history() {
     Storage storage(root);
     const auto initial = storage.load_config();
     CHECK(!initial.enabled);
+    CHECK(initial.mode == "normal");
+    CHECK(!initial.process_detection_enabled);
     CHECK(std::filesystem::exists(root / "config.json"));
     storage.append_history({123, "AP-TUT5", "98:8F:00:41:42:83", "", false, 845, "EAP failure"});
     auto aps = std::vector<AccessPoint>{base_ap("98:8F:00:41:42:83")};
@@ -261,6 +270,11 @@ void test_storage_target_ssid_update_preserves_other_fields() {
     original.min_improvement = 9.5;
     original.cooldown_seconds = 731;
     original.target_ssid = "OriginalNetwork";
+    original.mode = "gaming";
+    original.gaming_additional_margin = 7.5;
+    original.call_additional_margin = 18.0;
+    original.process_detection_enabled = true;
+    original.call_process_names = {"CustomCall.exe", "Second.exe"};
     storage.save_config(original);
 
     auto target_only_update = storage.load_config();
@@ -273,6 +287,11 @@ void test_storage_target_ssid_update_preserves_other_fields() {
     CHECK(saved.interval_seconds == original.interval_seconds);
     CHECK(std::abs(saved.min_improvement - original.min_improvement) < 0.001);
     CHECK(saved.cooldown_seconds == original.cooldown_seconds);
+    CHECK(saved.mode == original.mode);
+    CHECK(std::abs(saved.gaming_additional_margin - original.gaming_additional_margin) < 0.001);
+    CHECK(std::abs(saved.call_additional_margin - original.call_additional_margin) < 0.001);
+    CHECK(saved.process_detection_enabled == original.process_detection_enabled);
+    CHECK(saved.call_process_names == original.call_process_names);
   }
   std::filesystem::remove_all(root);
 }
@@ -324,6 +343,53 @@ void test_configurable_scoring_is_default_compatible_and_changes_ranking() {
   CHECK(std::abs(repeated[0].scoring.score - reranked[0].scoring.score) < 0.000001);
 }
 
+void test_application_modes_adjust_automatic_switching() {
+  AutoConfig config;
+  config.min_improvement = 12.0;
+  config.gaming_additional_margin = 8.0;
+  config.call_additional_margin = 15.0;
+  CHECK(mode_hysteresis_threshold(config, OptimizationMode::normal) == 12.0);
+  CHECK(mode_hysteresis_threshold(config, OptimizationMode::gaming) == 20.0);
+  CHECK(mode_hysteresis_threshold(config, OptimizationMode::call) == 27.0);
+  CHECK(mode_hysteresis_threshold(config, OptimizationMode::manual) == 12.0);
+  CHECK(mode_allows_automatic_switch(OptimizationMode::normal));
+  CHECK(mode_allows_automatic_switch(OptimizationMode::gaming));
+  CHECK(mode_allows_automatic_switch(OptimizationMode::call));
+  CHECK(!mode_allows_automatic_switch(OptimizationMode::manual));
+  CHECK(parse_optimization_mode("normal") == OptimizationMode::normal);
+  CHECK(parse_optimization_mode("gaming") == OptimizationMode::gaming);
+  CHECK(parse_optimization_mode("call") == OptimizationMode::call);
+  CHECK(parse_optimization_mode("manual") == OptimizationMode::manual);
+  CHECK(!parse_optimization_mode("unknown"));
+}
+
+void test_process_name_detection_finds_current_test_process() {
+  const auto detection = detect_monitored_process({"wifiopt_tests.exe"});
+  CHECK(detection.success);
+  CHECK(detection.matched);
+  CHECK(detection.matched_name == "wifiopt_tests.exe");
+}
+
+void test_time_decay_is_opt_in_and_default_compatible() {
+  auto ap = base_ap("00:00:00:00:00:31");
+  ap.history_attempts = 2;
+  ap.history_successes = 1;
+  constexpr std::int64_t reference = 2'000'000;
+  ap.history_samples = {{reference - 10 * 86400, true}, {reference, false}};
+
+  const auto implicit = score_access_point(ap);
+  const auto parsed_default = score_access_point(ap, parse_score_policy_json("{}"));
+  CHECK(implicit.score == parsed_default.score);
+  CHECK(implicit.quality_score == parsed_default.quality_score);
+
+  const auto decayed_policy = parse_score_policy_json(
+      R"({"connection_history_half_life_days":1,"history_reference_unix":2000000})");
+  const auto decayed = score_access_point(ap, decayed_policy);
+  CHECK(decayed.score < implicit.score);
+  CHECK(decayed.quality_score == implicit.quality_score);
+  CHECK(decayed.reasons.back().find("time-decayed connection history") != std::string::npos);
+}
+
 void test_history_statistics() {
   const std::vector<ConnectionRecord> rows{
       {100, "x", "00:00:00:00:00:01", "00:00:00:00:00:01", true, 0, "ok"},
@@ -337,6 +403,30 @@ void test_history_statistics() {
   CHECK(stats.by_bssid.at("00:00:00:00:00:02").attempts == 2);
   CHECK(stats.by_bssid.at("00:00:00:00:00:02").successes == 1);
   CHECK(stats.error_counts.at(845) == 1);
+  CHECK(!stats.average_connection_time_ms.has_value());
+}
+
+void test_history_time_bands_and_connection_duration() {
+  std::tm local{};
+  local.tm_year = 126;
+  local.tm_mon = 9;
+  local.tm_mday = 14;
+  local.tm_isdst = -1;
+  const auto timestamp_at = [&](int hour) {
+    auto value = local;
+    value.tm_hour = hour;
+    return static_cast<std::int64_t>(std::mktime(&value));
+  };
+  const std::vector<ConnectionRecord> rows{
+      {timestamp_at(2), "x", "00:00:00:00:00:01", "00:00:00:00:00:01", true, 0, "ok", std::nullopt, 100},
+      {timestamp_at(8), "x", "00:00:00:00:00:01", "00:00:00:00:00:01", false, 1, "fail", std::nullopt, 300},
+      {timestamp_at(14), "x", "00:00:00:00:00:01", "00:00:00:00:00:01", true, 0, "ok"},
+      {timestamp_at(20), "x", "00:00:00:00:00:01", "00:00:00:00:00:01", true, 0, "ok"}};
+  const auto stats = compute_history_stats(rows);
+  for (const auto& band : stats.by_time_band) CHECK(band.attempts == 1);
+  CHECK(stats.by_time_band[1].successes == 0);
+  CHECK(stats.average_connection_time_ms.has_value());
+  CHECK(std::abs(*stats.average_connection_time_ms - 200.0) < 0.001);
 }
 
 void test_blackbox_ring_and_disconnect_detection() {
@@ -488,12 +578,16 @@ int main() {
   test_storage_target_ssid_update_preserves_other_fields();
   test_scan_json_round_trip_and_duration_parser();
   test_configurable_scoring_is_default_compatible_and_changes_ranking();
+  test_application_modes_adjust_automatic_switching();
+  test_process_name_detection_finds_current_test_process();
+  test_time_decay_is_opt_in_and_default_compatible();
   test_history_statistics();
+  test_history_time_bands_and_connection_duration();
   test_blackbox_ring_and_disconnect_detection();
   test_blackbox_rotation_and_bssid_attribution();
   test_eventlog_xml_parser();
   test_gui_comparison_logic();
   if (failures) { std::cerr << failures << " test assertion(s) failed\n"; return 1; }
-  std::cout << "All 22 test groups passed\n";
+  std::cout << "All 26 test groups passed\n";
   return 0;
 }
