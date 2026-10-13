@@ -120,3 +120,71 @@ Priority 1実装時は、インストール済みWindows SDK 10.0.26100.0の`um\
 ## リソース管理の確認範囲
 
 コードレビューと全終了経路の確認では、WLAN列挙/BSS/接続属性/プロファイルXML/RSSI領域が`WlanFreeMemory` deleter、WLANハンドルがデストラクタ、通知が待機後に解除、プロセス/Mutexハンドルが明示解放される。動的リーク検査ツールによる検証は未実施のため、リークなしを実測成功とはしていない。
+
+## Priority 2: CLI高度化（2026-10-13）
+
+### ビルドと単体テスト
+
+- Visual Studio Build Tools 18.6.3、MSVC 19.51.36231、Windows SDK 10.0.26100.0、C++20を使用した。
+- Release全ターゲット（`wifiopt.exe`、`wifiopt_gui.exe`、`wifiopt_tests.exe`）: 成功。最終ビルド出力に警告0、エラー0。
+- Debug全ターゲット: 成功。最終ビルド出力に警告0、エラー0。
+- `ctest --test-dir build -C Release --output-on-failure`: 1/1成功、0失敗。
+- `ctest --test-dir build -C Debug --output-on-failure`: 1/1成功、0失敗。
+- テストは従来13群をすべて維持し、3群を追加して計16群。Release/Debugとも `All 16 test groups passed` 相当を確認した。
+
+追加テストで次を確認した。
+
+| 項目 | 結果 |
+|---|---|
+| schema version 1のscan JSON生成・再読込、引用符を含むSSID、BSS Load/PHY/最終観測時刻の往復 | 成功 |
+| `30m`、`7d`、単位なし秒の期間解析と、0/不正値の拒否 | 成功 |
+| `ScorePolicy{}`を明示した結果と従来の省略時スコア・順位が一致 | 成功 |
+| BSS Load重視のカスタム重みで意図したAPへ1位が変化 | 成功 |
+| 同じ入力・同じ重みの再計算でBSSIDとスコアが一致 | 成功 |
+| 履歴の観測開始/終了、サンプル数、BSSID別成功数、エラー845件数、AP切替回数 | 成功 |
+
+### CLI形式とオフラインsimulate
+
+リポジトリ内の分離済み`.runtime`を`WIFIOPT_DATA_DIR`に設定し、ビルド済みDebug版exeで確認した。
+
+- `simulate --input tests\data\scan_sample.json --format json`: 終了コード0。PowerShell `ConvertFrom-Json`でパース成功。
+- 同じ入力を既定重みで実行すると `00:11:22:33:44:55` が1位。
+- `--weights tests\data\weights_bss_load.json --compare --explain --format json`: 終了コード0。選択重みでは `00:11:22:33:44:66` が1位、`default_ranking`では `00:11:22:33:44:55` が1位。JSONパース成功。
+- `status --format json`: JSONパース成功。
+- `status --format csv`: ヘッダー9列、データ9列で一致し、`ConvertFrom-Csv`で解釈できた。
+- `status --format ndjson`: 1非空行を個別に`ConvertFrom-Json`でパース成功。
+- `history --stats`: 終了コード0。空の分離履歴に対し、観測期間 `not available`、サンプル0、切替0、平均接続時間未計測を表示した。空履歴を実データありとして扱っていない。
+- `diagnose --since 24h --json`: 終了コード0、JSONパース成功。
+- `diagnose --since invalid --json`: 明確な期間エラーを標準エラーへ出し終了コード2。
+- `inspect invalid`: Native Wi-Fi APIを呼ぶ前に入力を拒否し終了コード2。
+- `watch --interval 1s --duration 15s`: 最小間隔違反を標準エラーへ出し終了コード2。
+
+標準出力のJSON/CSV/NDJSONは上記のとおり機械的に検証した。標準エラーのメッセージはPowerShellのストリーム表示順によりコマンド後に表示される場合があったが、終了コードは各実行直後に取得した。
+
+### 実WLAN依存コマンドの確認結果
+
+次の短時間実行を行ったが、Windowsが`WlanScan`をエラー5（アクセス拒否）で拒否した。従来テスト時と同じく、Windows位置情報サービス/デスクトップアプリ位置情報アクセスが検証セッションに許可されていないためである。
+
+- `inspect 00:00:00:00:00:00 --format json`: スキャン段階で終了コード1。したがって「スキャン成功後にBSSIDが存在せず終了コード2」の実機経路は**未確認**。
+- `optimize --dry-run --explain --format json`: スキャン段階で終了コード1。コードレビューではdry-run分岐が候補/改善幅/閾値判定後、`connect_bssid`より前に戻り、接続履歴も追加しないことを確認したが、実APを使う判定完了は**未確認**。
+- `watch --interval 5s --duration 15s --format ndjson`: 初回スキャンで終了コード1。15秒間の継続出力とCtrl+C正常終了は**未確認**。無線アクセス拒否を0件成功またはwatch成功として扱っていない。
+
+`diagnose --since`と`history --stats`はビルド済みexeで正常系・異常系を確認できた。`inspect`は入力異常系のみ確認でき、実スキャン正常系と「有効だが存在しないBSSID」は上記環境制約で未確認である。
+
+### コードレビューで確認した安全性
+
+- 生IEは`WLAN_BSS_LIST::dwTotalSize`、各entryの位置、`ulIeOffset`、`ulIeSize`の加減算境界をすべて確認できた場合だけ`AccessPoint`へコピーする。
+- `simulate`分岐は`WlanClient`構築より前に完結し、既存の純粋関数`rank_access_points`を使用する。WLANスキャン・接続呼び出しはない。
+- `inspect`と`watch`は`scan`/`status`/ランキングだけを使い、`connect_bssid`を呼ばない。
+- `optimize --dry-run`は通常の`Optimizer::optimize_once`判定を共有し、`would_switch`設定後に接続呼び出しより前で終了する。
+- watchは各ループのランキングをローカル変数として破棄し、結果履歴をメモリへ蓄積しない。Ctrl+Cハンドラは停止フラグだけを設定する。
+
+### 未検証
+
+- 位置情報アクセスを許可した環境での`inspect`詳細・raw IE・存在しないBSSID終了コード2
+- 実APを用いた`optimize --dry-run`の切替予定/不要の両判定
+- watchの15秒継続、Ctrl+C停止、実NDJSON周期出力
+- watchの1時間以上の長時間安定性、メモリ使用量推移、動的リーク検査（時間的制約により未実施）
+- 日本語/絵文字SSIDを含む全外部JSON実装間のUnicode相互運用
+
+接続変更を伴う通常の`optimize`、`connect`、daemon切替はPriority 2の検証では実行していない。GUIソースは変更しておらず、Priority 2後のGUI操作スモークテストも実施していない（全ターゲットのRelease/Debugリンク成功のみ確認）。

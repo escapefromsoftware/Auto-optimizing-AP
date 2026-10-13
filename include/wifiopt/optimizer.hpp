@@ -10,17 +10,23 @@ namespace wifiopt {
 
 struct OptimizeResult {
   bool action_taken{};
+  bool would_switch{};
+  bool dry_run{};
   bool success{};
   std::string message;
   std::optional<RankedAccessPoint> recommended;
   std::optional<ConnectResult> connection;
+  std::optional<double> improvement;
+  double threshold{};
+  bool cooldown_active{};
 };
 
 class Optimizer {
  public:
   explicit Optimizer(Storage& storage) : storage_(storage) {}
   std::vector<RankedAccessPoint> rank(WlanClient& wlan, const std::string& ssid);
-  OptimizeResult optimize_once(WlanClient& wlan, const AutoConfig& config, bool force_evaluation = true);
+  OptimizeResult optimize_once(WlanClient& wlan, const AutoConfig& config,
+                               bool force_evaluation = true, bool dry_run = false);
  private:
   Storage& storage_;
 };

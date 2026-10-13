@@ -96,50 +96,65 @@ bool valid_bssid(const std::string& value) noexcept {
 
 static double clamp(double v, double lo, double hi) { return std::max(lo, std::min(v, hi)); }
 
+static std::string policy_number(double value) {
+  std::ostringstream out;
+  out << std::defaultfloat << value;
+  return out.str();
+}
+
 ScoreResult score_access_point(const AccessPoint& ap, const ScorePolicy& policy) {
   ScoreResult result;
   const double rssi_quality = clamp((ap.rssi_dbm + 90.0) / 40.0, 0.0, 1.0);
-  const double signal = 32.0 * rssi_quality + 13.0 * clamp(ap.signal_quality / 100.0, 0.0, 1.0);
+  const double signal = policy.rssi_weight * rssi_quality +
+                        policy.signal_quality_weight * clamp(ap.signal_quality / 100.0, 0.0, 1.0);
   result.score += signal;
   {
-    std::ostringstream s; s << "signal " << std::fixed << std::setprecision(1) << signal << "/45 ("
+    std::ostringstream s; s << "signal " << std::fixed << std::setprecision(1) << signal << "/"
+                            << policy_number(policy.rssi_weight + policy.signal_quality_weight) << " ("
                             << ap.rssi_dbm << " dBm, " << ap.signal_quality << "%)";
     result.reasons.push_back(s.str());
   }
 
-  double load = 10.0;
+  double load = policy.bss_load_neutral_score;
   if (ap.bss_load) {
-    load = 20.0 * (1.0 - ap.bss_load->channel_utilization / 255.0);
+    load = policy.bss_load_weight * (1.0 - ap.bss_load->channel_utilization / 255.0);
     result.score += load;
     std::ostringstream s; s << "BSS channel utilization "
                             << std::lround(ap.bss_load->channel_utilization * 100.0 / 255.0)
-                            << "% => " << std::fixed << std::setprecision(1) << load << "/20"
+                            << "% => " << std::fixed << std::setprecision(1) << load << "/"
+                            << policy_number(policy.bss_load_weight)
                             << "; stations=" << ap.bss_load->station_count
                             << " (station count is not traffic load)";
     result.reasons.push_back(s.str());
   } else {
-    result.score += 10.0;
-    result.reasons.push_back("BSS Load unavailable: neutral 10/20; utilization not invented");
+    result.score += load;
+    std::ostringstream s;
+    s << "BSS Load unavailable: neutral " << policy_number(load) << "/"
+      << policy_number(policy.bss_load_weight) << "; utilization not invented";
+    result.reasons.push_back(s.str());
   }
 
-  const double overlap = 8.0 / (1.0 + 0.35 * ap.cochannel_neighbors);
+  const double overlap = policy.channel_interference_weight /
+                         (1.0 + policy.channel_interference_decay * ap.cochannel_neighbors);
   result.score += overlap;
   {
     std::ostringstream s; s << "co-channel neighbors " << ap.cochannel_neighbors << " => "
-                            << std::fixed << std::setprecision(1) << overlap << "/8";
+                            << std::fixed << std::setprecision(1) << overlap << "/"
+                            << policy_number(policy.channel_interference_weight);
     result.reasons.push_back(s.str());
   }
   result.quality_score = signal + load + overlap;
 
-  double history = 8.5;
+  double history = policy.connection_history_neutral_score;
   if (ap.history_attempts > 0) {
     const double smoothed = (ap.history_successes + 1.0) / (ap.history_attempts + 2.0);
-    history = 17.0 * smoothed;
+    history = policy.connection_history_weight * smoothed;
   }
   result.score += history;
   {
     std::ostringstream s; s << "connection history " << ap.history_successes << "/" << ap.history_attempts
-                            << " => " << std::fixed << std::setprecision(1) << history << "/17";
+                            << " => " << std::fixed << std::setprecision(1) << history << "/"
+                            << policy_number(policy.connection_history_weight);
     result.reasons.push_back(s.str());
   }
 

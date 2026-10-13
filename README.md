@@ -66,6 +66,29 @@ GUIと`wifiopt.exe`は同じディレクトリに配置してください。GUI�
 .\build\Release\wifiopt.exe diagnose
 ```
 
+高度なCLIでは、機械可読出力、BSSID詳細確認、接続しない事前判定、履歴集計、オフライン再計算、ヘッドレス監視を利用できます。
+
+```powershell
+# スキャン結果を保存し、Wi-Fiを操作せず同じデータを再ランキング
+.\build\Release\wifiopt.exe scan --format json > scan.json
+.\build\Release\wifiopt.exe simulate --input scan.json --explain
+
+# AP詳細とIE検出状況（読み取り専用）
+.\build\Release\wifiopt.exe inspect 98:8F:00:41:5A:E4 --ssid AP-TUT5 --verbose
+
+# 実際には切り替えず、既存optimizerの判定結果だけを確認
+.\build\Release\wifiopt.exe optimize --dry-run --explain --format json
+
+# 履歴統計と直近24時間の診断
+.\build\Release\wifiopt.exe history --stats
+.\build\Release\wifiopt.exe diagnose --since 24h --json
+
+# 5秒間隔で15秒だけNDJSON監視（接続操作なし）
+.\build\Release\wifiopt.exe watch --interval 5s --duration 15s --format ndjson
+```
+
+全コマンド、重みファイル、JSONスキーマ、終了コードは [CLIリファレンス](docs/CLI_REFERENCE.md) を参照してください。
+
 `target [SSID]`はWLANへ接続せず、保存済み設定の`target_ssid`だけを表示または変更します。`enabled`、評価間隔、改善幅、クールダウンなどの他設定は保持されます。`--ssid`は従来どおり、そのコマンド実行中だけの一時指定です。
 
 `connect` と `optimize` は一時切断を起こし得ます。希望BSSIDはドライバーへの要求であり保証ではないため、完了後に実BSSIDを照合して不一致を明示します。切替失敗時は元BSSIDへの復帰を1回だけ試みます。

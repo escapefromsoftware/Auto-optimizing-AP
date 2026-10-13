@@ -247,6 +247,7 @@ std::vector<AccessPoint> WlanClient::scan(const std::optional<std::string>& filt
           entry_offset <= total_size && ie_offset <= total_size - entry_offset &&
           ie_size <= total_size - entry_offset - ie_offset) {
         const std::span<const std::uint8_t> ies{base + ie_offset, ie_size};
+        ap.raw_information_elements.assign(ies.begin(), ies.end());
         ap.bss_load = parse_bss_load(ies);
         if (const auto parsed = parse_information_elements(ies)) {
           ap.ht_capabilities = parsed->ht_capabilities;

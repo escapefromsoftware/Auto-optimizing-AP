@@ -1,0 +1,8 @@
+{
+  "signal_rssi": 0,
+  "signal_quality": 0,
+  "bss_load": 100,
+  "bss_load_neutral": 50,
+  "channel_interference": 8,
+  "connection_history": 17
+}
