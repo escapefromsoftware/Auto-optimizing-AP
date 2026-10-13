@@ -11,7 +11,9 @@ namespace wifiopt {
 
 std::vector<RankedAccessPoint> Optimizer::rank(WlanClient& wlan, const std::string& ssid) {
   // Scan every SSID so co-channel neighbor counts include other networks too.
-  auto aps = wlan.scan();
+  ConnectionStatus observed_status;
+  auto aps = wlan.scan(std::nullopt, std::chrono::milliseconds(2500), &observed_status);
+  if (blackbox_) blackbox_->observe(make_wifi_observation(observed_status));
   storage_.record_observations(aps);
   aps.erase(std::remove_if(aps.begin(), aps.end(), [&](const auto& ap) { return ap.ssid != ssid; }), aps.end());
   storage_.enrich_with_history(aps);
@@ -26,6 +28,7 @@ OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& conf
   if (ranked.empty()) { out.message = "No BSS found for SSID '" + config.target_ssid + "'"; return out; }
   out.recommended = ranked.front();
   const auto before = wlan.status();
+  if (blackbox_) blackbox_->observe(make_wifi_observation(before));
   const auto current = std::find_if(ranked.begin(), ranked.end(), [](const auto& item) { return item.ap.current; });
   if (ranked.front().ap.current) {
     out.success = true;
@@ -56,17 +59,31 @@ OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& conf
   out.connection = wlan.connect_bssid(config.target_ssid, ranked.front().ap.bssid);
   const auto& c = *out.connection;
   out.success = c.success && c.desired_bssid_matched;
-  storage_.append_history({unix_now(), config.target_ssid, c.requested_bssid, c.actual_bssid,
-                           out.success, c.api_error ? c.api_error : c.reason_code, c.detail});
+  const auto after = wlan.status();
+  const ConnectionRecord connection_record{
+      unix_now(), config.target_ssid, c.requested_bssid, c.actual_bssid, out.success,
+      c.api_error ? c.api_error : c.reason_code, c.detail};
+  storage_.append_history(connection_record);
+  if (blackbox_) {
+    blackbox_->record_connection(connection_record, make_wifi_observation(after));
+    blackbox_->observe(make_wifi_observation(after), true);
+  }
   out.message = c.detail;
 
   if (!out.success && before.connected && before.ssid == config.target_ssid && valid_bssid(before.bssid)) {
     // One bounded rollback attempt; never modify the saved enterprise profile.
     auto rollback = wlan.connect_bssid(config.target_ssid, before.bssid, std::chrono::seconds(20));
-    storage_.append_history({unix_now(), config.target_ssid, before.bssid, rollback.actual_bssid,
-                             rollback.success && rollback.desired_bssid_matched,
-                             rollback.api_error ? rollback.api_error : rollback.reason_code,
-                             "rollback: " + rollback.detail});
+    const auto after_rollback = wlan.status();
+    const ConnectionRecord rollback_record{
+        unix_now(), config.target_ssid, before.bssid, rollback.actual_bssid,
+        rollback.success && rollback.desired_bssid_matched,
+        rollback.api_error ? rollback.api_error : rollback.reason_code,
+        "rollback: " + rollback.detail};
+    storage_.append_history(rollback_record);
+    if (blackbox_) {
+      blackbox_->record_connection(rollback_record, make_wifi_observation(after_rollback));
+      blackbox_->observe(make_wifi_observation(after_rollback), true);
+    }
     out.message += rollback.success && rollback.desired_bssid_matched
                        ? "; original BSSID restored"
                        : "; rollback did not restore the original BSSID";
@@ -121,13 +138,15 @@ int run_daemon(const std::filesystem::path&, Storage& storage) {
   int exit_code = 0;
   try {
     WlanClient wlan;
-    Optimizer optimizer(storage);
+    BlackBox blackbox(storage.root());
+    Optimizer optimizer(storage, &blackbox);
     while (true) {
       auto config = storage.load_config();
       if (!config.enabled) break;
       state.status = "monitoring";
       state.heartbeat_unix = unix_now();
       const auto current = wlan.status();
+      blackbox.observe(make_wifi_observation(current));
       state.ssid = current.ssid;
       state.bssid = current.bssid;
       state.detail = "evaluating";
@@ -141,6 +160,7 @@ int run_daemon(const std::filesystem::path&, Storage& storage) {
       } else state.detail = "cooldown active";
       state.heartbeat_unix = unix_now();
       const auto after = wlan.status();
+      blackbox.observe(make_wifi_observation(after));
       state.ssid = after.ssid;
       state.bssid = after.bssid;
       storage.save_daemon_state(state);

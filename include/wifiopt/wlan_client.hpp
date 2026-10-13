@@ -65,7 +65,8 @@ class WlanClient {
   std::vector<InterfaceInfo> interfaces() const;
   ConnectionStatus status() const;
   std::vector<AccessPoint> scan(const std::optional<std::string>& ssid = std::nullopt,
-                                std::chrono::milliseconds wait = std::chrono::milliseconds(2500));
+                                std::chrono::milliseconds wait = std::chrono::milliseconds(2500),
+                                ConnectionStatus* observed_status = nullptr);
   ConnectResult connect_bssid(const std::string& ssid, const std::string& bssid,
                               std::chrono::milliseconds timeout = std::chrono::seconds(25));
 

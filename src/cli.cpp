@@ -1,4 +1,5 @@
 #include "wifiopt/cli.hpp"
+#include "wifiopt/blackbox.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -429,6 +430,78 @@ HistoryStats compute_history_stats(const std::vector<ConnectionRecord>& rows) {
     }
   }
   return stats;
+}
+
+std::string blackbox_record_json(const BlackBoxRecord& record) {
+  const auto observation_json = [](const WifiObservation& observation) {
+    std::ostringstream out;
+    out << "{\"unix_time\":" << observation.unix_time
+        << ",\"ssid\":\"" << json_escape(observation.ssid)
+        << "\",\"bssid\":\"" << json_escape(observation.bssid)
+        << "\",\"rssi_dbm\":" << observation.rssi_dbm
+        << ",\"signal_quality\":" << observation.signal_quality
+        << ",\"connected\":" << (observation.connected ? "true" : "false") << '}';
+    return out.str();
+  };
+
+  std::ostringstream out;
+  out << "{\"schema_version\":1,\"unix_time\":" << record.unix_time
+      << ",\"event_type\":\"" << blackbox_event_type_name(record.event_type)
+      << "\",\"error_code\":" << record.error_code
+      << ",\"ssid\":\"" << json_escape(record.ssid)
+      << "\",\"related_bssid\":\"" << json_escape(record.related_bssid)
+      << "\",\"requested_bssid\":\"" << json_escape(record.requested_bssid)
+      << "\",\"actual_bssid\":\"" << json_escape(record.actual_bssid)
+      << "\",\"detail\":\"" << json_escape(record.detail)
+      << "\",\"possible_cause\":\"" << json_escape(record.possible_cause)
+      << "\",\"recommended_action\":\"" << json_escape(record.recommended_action)
+      << "\",\"observations_before\":[";
+  for (std::size_t i = 0; i < record.observations_before.size(); ++i) {
+    if (i) out << ',';
+    out << observation_json(record.observations_before[i]);
+  }
+  out << "],\"event_observation\":" << observation_json(record.event_observation) << '}';
+  return out.str();
+}
+
+BlackBoxRecord parse_blackbox_record_json(std::string_view text) {
+  const auto root = object(JsonParser(text).parse(), "black box record");
+  if (number_member(root, "schema_version", -1) != 1)
+    throw std::runtime_error("unsupported black box schema_version");
+
+  const auto parse_observation = [](const Json& value) {
+    const auto& item = object(value, "black box observation");
+    WifiObservation observation;
+    observation.unix_time = static_cast<std::int64_t>(number_member(item, "unix_time", 0));
+    observation.ssid = string_member(item, "ssid");
+    observation.bssid = string_member(item, "bssid");
+    observation.rssi_dbm = static_cast<int>(number_member(item, "rssi_dbm", -100));
+    observation.signal_quality = static_cast<unsigned>(number_member(item, "signal_quality", 0));
+    observation.connected = bool_member(item, "connected", false);
+    return observation;
+  };
+
+  BlackBoxRecord record;
+  record.unix_time = static_cast<std::int64_t>(number_member(root, "unix_time", 0));
+  const auto type = parse_blackbox_event_type(string_member(root, "event_type"));
+  if (!type) throw std::runtime_error("unknown black box event_type");
+  record.event_type = *type;
+  record.error_code = static_cast<std::uint32_t>(number_member(root, "error_code", 0));
+  record.ssid = string_member(root, "ssid");
+  record.related_bssid = string_member(root, "related_bssid");
+  record.requested_bssid = string_member(root, "requested_bssid");
+  record.actual_bssid = string_member(root, "actual_bssid");
+  record.detail = string_member(root, "detail");
+  record.possible_cause = string_member(root, "possible_cause");
+  record.recommended_action = string_member(root, "recommended_action");
+  if (const auto* before = member(root, "observations_before")) {
+    for (const auto& value : array(*before, "observations_before"))
+      record.observations_before.push_back(parse_observation(value));
+  }
+  const auto* event = member(root, "event_observation");
+  if (!event) throw std::runtime_error("missing event_observation");
+  record.event_observation = parse_observation(*event);
+  return record;
 }
 
 } // namespace wifiopt

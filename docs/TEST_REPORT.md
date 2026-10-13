@@ -188,3 +188,62 @@ Priority 1実装時は、インストール済みWindows SDK 10.0.26100.0の`um\
 - 日本語/絵文字SSIDを含む全外部JSON実装間のUnicode相互運用
 
 接続変更を伴う通常の`optimize`、`connect`、daemon切替はPriority 2の検証では実行していない。GUIソースは変更しておらず、Priority 2後のGUI操作スモークテストも実施していない（全ターゲットのRelease/Debugリンク成功のみ確認）。
+
+## Priority 3: Wi-Fi Black Box / 認証エラー分析 / 診断レポート（2026-10-13）
+
+### ビルドと回帰テスト
+
+- Visual Studio Build Tools 18.6.3、MSVC 19.51.36231、Windows SDK 10.0.26100.0、C++20を使用した。
+- `cmake --build build --config Debug --parallel`: 全ターゲット成功。最終出力に警告0、エラー0。
+- `cmake --build build --config Release --parallel`: 全ターゲット成功。最終出力に警告0、エラー0。
+- `ctest --test-dir build -C Debug --output-on-failure`: 1/1成功、0失敗。
+- `ctest --test-dir build -C Release --output-on-failure`: 1/1成功、0失敗。
+- Debug/Releaseの`wifiopt_tests.exe`を直接実行し、両方で`All 19 test groups passed`を確認した。従来16群を維持し、Priority 3用に3群を追加した。
+
+追加テストで確認した内容は次のとおり。
+
+| 項目 | 結果 |
+|---|---|
+| 観測リング容量3件の境界、4件追加時に最古を破棄 | 成功 |
+| 連続観測のconnected→disconnectedで障害を1件生成し、直前3観測を保持 | 成功 |
+| `expected_disconnect=true`で既知操作の切断を記録しない | 成功 |
+| 永続レコード上限3件へ5件追加し、時刻102～104の直近3件だけを保持 | 成功 |
+| エラー845の原因候補が認証の証拠に限定し、AP故障の断定を含まない | 成功 |
+| BSSID不明の接続失敗でrelated/requested/actual BSSIDを空のまま保持 | 成功 |
+| 要求BSSIDと実BSSIDの不一致を`ap_switch_failure`として分類 | 成功 |
+| サンプルイベントXMLからEvent ID、UTC時刻、XML entityを含むSSID、BSSID、845、説明を抽出 | 成功 |
+| Event IDのない不正/非対象XMLを安全に拒否 | 成功 |
+
+テスト用Black Boxディレクトリは各テストの前後に削除し、永続化の読戻しまで確認した。実際のWindowsイベントログAPIは単体テストでモックせず、下記ビルド済みexeの実行で確認した。
+
+### ビルド済みCLIの実行確認
+
+リポジトリ内の分離データディレクトリ`.runtime\priority3-final`を`WIFIOPT_DATA_DIR`へ設定し、実Wi-Fi接続を変更しないコマンドだけを実行した。
+
+- Debug版`wifiopt blackbox`: 終了コード0。空の分離環境に対し`No Black Box failure records have been recorded.`を表示した。空を障害記録ありとして扱っていない。
+- Release版`wifiopt blackbox --format json`: 終了コード0。PowerShell `ConvertFrom-Json`で解析成功し、`data`は0件だった。
+- Release版`wifiopt diagnose --report --since 24h`: 終了コード0。Current connection、History statistics、Black Box records、Windows WLAN AutoConfig eventsの4セクションをすべて確認した。
+- Debug版`wifiopt diagnose --report --since 24h --format json`: 終了コード0。`ConvertFrom-Json`で解析成功。履歴サンプル0、イベントログ`available=true`、Windowsエラー0、関連イベント83件を取得した。
+- Release版`wifiopt diagnose`（`--report`なし）: 終了コード0。従来の`Recent recorded attempts:`要約を維持していることを確認した。
+
+この環境では`Microsoft-Windows-WLAN-AutoConfig/Operational`への読み取りが成功したため、権限拒否/チャネル不在時の実機フォールバックは発生しなかった。`query_wlan_events`がその場合に`available=false`、Windowsエラーコード、説明を返し、CLIが同じレポート内の状態・履歴・Black Box出力を継続する経路はコードレビューで確認したが、実環境での拒否を成功扱いにはしていない。
+
+### 確認した安全性
+
+- イベントログ処理は`EvtQuery`、`EvtNext`、`EvtRender(EvtRenderEventXml)`、`EvtClose`だけを使用し、消去・書込み・チャネル設定変更APIを呼ばない。
+- Black Boxは時刻、SSID、BSSID、RSSI、Signal Quality、接続状態、接続結果のreason/API codeと説明だけを保存する。パスワード、秘密鍵、証明書本体、ユーザー資格情報を取得するコードや保存フィールドはない。
+- スキャン経路は`WlanClient::scan`内部ですでに取得していた接続状態を呼び出し側へ返すため、Black Box観測用の追加スキャンを行わない。
+- `connect`/`optimize`は履歴へ保存する同じ`ConnectionRecord`を障害判定へ渡し、BSSID不明時には推測で関連付けない。
+- Black Box JSONの生成/読込は既存`cli.cpp`の`json_escape`と`JsonParser`を共有し、ファイル置換は既存Storageと同じatomic write実装を共有する。
+- GUIソース`src/gui_main.cpp`は変更していない。全ターゲットビルドでGUIのリンク成功は確認したが、Priority 3としてGUI操作は実施していない。
+
+### 未確認・対象外
+
+- 実際の接続失敗、EAP 845、意図しない切断、希望BSSID不一致を発生させたBlack Box実機記録（接続変更を避けたため未実施）
+- イベントログのアクセス拒否、Operationalチャネル無効/不在の実機環境でのフォールバック（本環境では読取成功）
+- DHCP失敗、DNS/ゲートウェイ/インターネット到達性喪失の検出（対応情報を既存コアが取得しないため対象外）
+- 複数の`wifiopt`プロセスが同時に`blackbox.jsonl`を書き換える競合試験（プロセス間ロックは未実装）
+- Black Box 500件を実CLIで発生させる長時間試験（同じローテーション処理を上限3件にした単体テストで境界を確認）
+- イベントログの全Windows言語・全OSビルド・全イベントスキーマに対する互換性
+
+通常の`connect`、接続変更を伴う`optimize`、daemonによるAP切替、Windows設定変更、イベントログ変更は実施していない。取得したイベントは読み取りのみである。

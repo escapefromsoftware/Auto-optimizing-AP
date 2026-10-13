@@ -1,5 +1,6 @@
 #pragma once
 
+#include "wifiopt/blackbox.hpp"
 #include "wifiopt/storage.hpp"
 #include "wifiopt/wlan_client.hpp"
 
@@ -23,12 +24,14 @@ struct OptimizeResult {
 
 class Optimizer {
  public:
-  explicit Optimizer(Storage& storage) : storage_(storage) {}
+  explicit Optimizer(Storage& storage, BlackBox* blackbox = nullptr)
+      : storage_(storage), blackbox_(blackbox) {}
   std::vector<RankedAccessPoint> rank(WlanClient& wlan, const std::string& ssid);
   OptimizeResult optimize_once(WlanClient& wlan, const AutoConfig& config,
                                bool force_evaluation = true, bool dry_run = false);
  private:
   Storage& storage_;
+  BlackBox* blackbox_{};
 };
 
 bool process_is_running(std::uint32_t pid) noexcept;

@@ -1,4 +1,6 @@
 #include "wifiopt/cli.hpp"
+#include "wifiopt/blackbox.hpp"
+#include "wifiopt/eventlog.hpp"
 #include "wifiopt/optimizer.hpp"
 
 #include <windows.h>
@@ -43,7 +45,8 @@ void help() {
       "  wifiopt connect <BSSID> [--ssid SSID]\n"
       "  wifiopt optimize [--ssid SSID] [--dry-run] [--explain] [--format text|json]\n"
       "  wifiopt history [--stats] [--format text|json|csv|ndjson]\n"
-      "  wifiopt diagnose [--since 30m|24h|7d] [--json] [--format text|json|csv|ndjson]\n"
+      "  wifiopt blackbox [--since 30m|24h|7d] [--format text|json]\n"
+      "  wifiopt diagnose [--since 30m|24h|7d] [--report] [--json] [--format text|json|csv|ndjson]\n"
       "  wifiopt simulate --input FILE [--weights FILE] [--compare] [--explain] [--format text|json]\n"
       "  wifiopt watch --interval SECONDS|Ns|Nm [--duration Ns|Nm|Nh|Nd] [--ssid SSID] [--format text|ndjson]\n"
       "  wifiopt auto on|off|status [--ssid SSID]\n"
@@ -243,6 +246,68 @@ std::string history_stats_json(const HistoryStats& stats) {
   return out.str();
 }
 
+std::string wlan_event_json(const WlanEvent& event) {
+  std::ostringstream out;
+  out << "{\"unix_time\":" << event.unix_time << ",\"event_id\":" << event.event_id
+      << ",\"ssid\":\"" << json_escape(event.ssid) << "\",\"bssid\":\""
+      << json_escape(event.bssid) << "\",\"error_code\":";
+  if (event.error_code) out << *event.error_code; else out << "null";
+  out << ",\"description\":\"" << json_escape(event.description) << "\"}";
+  return out.str();
+}
+
+void print_blackbox_record_text(const BlackBoxRecord& record) {
+  std::cout << record.unix_time << "  " << blackbox_event_type_name(record.event_type)
+            << "  code=" << record.error_code;
+  if (!record.ssid.empty()) std::cout << "  ssid=" << record.ssid;
+  if (!record.related_bssid.empty()) std::cout << "  bssid=" << record.related_bssid;
+  std::cout << "\n  Detail: " << record.detail
+            << "\n  Possible cause: " << record.possible_cause
+            << "\n  Recommended action: " << record.recommended_action
+            << "\n  Prior observations: " << record.observations_before.size() << "\n";
+  for (const auto& observation : record.observations_before) {
+    std::cout << "    " << observation.unix_time << " "
+              << (observation.connected ? "connected" : "disconnected");
+    if (!observation.ssid.empty()) std::cout << " ssid=" << observation.ssid;
+    if (!observation.bssid.empty()) std::cout << " bssid=" << observation.bssid;
+    std::cout << " rssi=" << observation.rssi_dbm
+              << " quality=" << observation.signal_quality << "%\n";
+  }
+}
+
+int run_blackbox(int argc, char** argv, BlackBox& blackbox, bool quiet) {
+  const auto format = requested_format(argc, argv);
+  if (!format || (*format != OutputFormat::text && *format != OutputFormat::json))
+    return invalid_format();
+  auto records = blackbox.load_records();
+  if (has_option(argc, argv, "--since")) {
+    const auto duration = parse_duration_seconds(option_value(argc, argv, "--since", ""));
+    if (!duration) {
+      std::cerr << "Invalid --since duration; use values such as 30m, 24h, or 7d\n";
+      return 2;
+    }
+    const auto cutoff = unix_now() - static_cast<std::int64_t>(*duration);
+    records.erase(std::remove_if(records.begin(), records.end(),
+                                 [&](const auto& record) { return record.unix_time < cutoff; }),
+                  records.end());
+  }
+  if (quiet) return 0;
+  if (*format == OutputFormat::json) {
+    std::cout << "{\"schema_version\":1,\"command\":\"blackbox\",\"data\":[";
+    for (std::size_t i = 0; i < records.size(); ++i) {
+      if (i) std::cout << ',';
+      std::cout << blackbox_record_json(records[i]);
+    }
+    std::cout << "]}\n";
+  } else if (records.empty()) {
+    std::cout << "No Black Box failure records have been recorded.\n";
+  } else {
+    std::cout << "Black Box records: " << records.size() << "\n";
+    for (const auto& record : records) print_blackbox_record_text(record);
+  }
+  return 0;
+}
+
 const char* optional_bool_text(const std::optional<bool>& value) {
   if (!value) return "unavailable";
   return *value ? "yes" : "no";
@@ -302,7 +367,8 @@ int run_simulate(int argc, char** argv, bool quiet) {
   }
 }
 
-int run_watch(int argc, char** argv, Storage& storage, AutoConfig config, bool quiet) {
+int run_watch(int argc, char** argv, Storage& storage, BlackBox& blackbox,
+              AutoConfig config, bool quiet) {
   const auto interval_text = option_value(argc, argv, "--interval", "");
   const auto interval = parse_duration_seconds(interval_text, true);
   if (!interval || *interval < 5) {
@@ -319,7 +385,7 @@ int run_watch(int argc, char** argv, Storage& storage, AutoConfig config, bool q
   stop_watch = false;
   SetConsoleCtrlHandler(console_handler, TRUE);
   WlanClient wlan;
-  Optimizer optimizer(storage);
+  Optimizer optimizer(storage, &blackbox);
   const auto started = std::chrono::steady_clock::now();
   while (!stop_watch) {
     const auto ranked = optimizer.rank(wlan, config.target_ssid);
@@ -366,6 +432,7 @@ int main(int argc, char** argv) {
     (void)has_option(argc, argv, "--no-color"); // Reserved; current output is intentionally uncolored.
     Storage storage;
     auto config = storage.load_config();
+    BlackBox blackbox(storage.root());
 
     if (command == "target") {
       if (argc == 2) { std::cout << config.target_ssid << "\n"; return 0; }
@@ -381,7 +448,8 @@ int main(int argc, char** argv) {
     config.target_ssid = option_value(argc, argv, "--ssid", config.target_ssid);
     if (command == "daemon") return run_daemon(self_path(), storage);
     if (command == "simulate") return run_simulate(argc, argv, quiet);
-    if (command == "watch") return run_watch(argc, argv, storage, config, quiet);
+    if (command == "watch") return run_watch(argc, argv, storage, blackbox, config, quiet);
+    if (command == "blackbox") return run_blackbox(argc, argv, blackbox, quiet);
 
     if (command == "auto") {
       if (argc < 3) { std::cerr << "Expected auto on, off, or status\n"; return 2; }
@@ -480,7 +548,7 @@ int main(int argc, char** argv) {
     }
 
     WlanClient wlan;
-    Optimizer optimizer(storage);
+    Optimizer optimizer(storage, &blackbox);
     if (command == "status") {
       const auto format = requested_format(argc, argv); if (!format) return invalid_format();
       const auto value = wlan.status(); if (!quiet) print_status_formatted(value, *format); return 0;
@@ -550,9 +618,16 @@ int main(int argc, char** argv) {
     }
     if (command == "connect") {
       if (argc < 3 || !valid_bssid(argv[2])) { std::cerr << "A valid BSSID is required\n"; return 2; }
+      const auto before = wlan.status();
+      blackbox.observe(make_wifi_observation(before));
       const auto r = wlan.connect_bssid(config.target_ssid, argv[2]); const bool success = r.success && r.desired_bssid_matched;
-      storage.append_history({unix_now(), config.target_ssid, r.requested_bssid, r.actual_bssid,
-                              success, r.api_error ? r.api_error : r.reason_code, r.detail});
+      const auto after = wlan.status();
+      const ConnectionRecord connection_record{
+          unix_now(), config.target_ssid, r.requested_bssid, r.actual_bssid,
+          success, r.api_error ? r.api_error : r.reason_code, r.detail};
+      storage.append_history(connection_record);
+      blackbox.record_connection(connection_record, make_wifi_observation(after));
+      blackbox.observe(make_wifi_observation(after), true);
       std::cout << r.detail << "\nRequested: " << r.requested_bssid << "\nActual: " << r.actual_bssid << "\n";
       return success ? 0 : 1;
     }
@@ -585,17 +660,75 @@ int main(int argc, char** argv) {
     }
     if (command == "diagnose") {
       const auto format = requested_format(argc, argv); if (!format) return invalid_format();
+      const bool report = has_option(argc, argv, "--report");
+      if (report && *format != OutputFormat::text && *format != OutputFormat::json)
+        return invalid_format();
       auto rows = storage.load_history(std::numeric_limits<std::size_t>::max());
+      std::optional<std::uint64_t> requested_since;
       if (has_option(argc, argv, "--since")) {
-        const auto duration = parse_duration_seconds(option_value(argc, argv, "--since", ""));
-        if (!duration) { std::cerr << "Invalid --since duration; use values such as 30m, 24h, or 7d\n"; return 2; }
-        const auto cutoff = unix_now() - static_cast<std::int64_t>(*duration);
+        requested_since = parse_duration_seconds(option_value(argc, argv, "--since", ""));
+        if (!requested_since) { std::cerr << "Invalid --since duration; use values such as 30m, 24h, or 7d\n"; return 2; }
+        const auto cutoff = unix_now() - static_cast<std::int64_t>(*requested_since);
         rows.erase(std::remove_if(rows.begin(), rows.end(), [&](const auto& row) { return row.unix_time < cutoff; }), rows.end());
-      } else if (rows.size() > 20) rows.erase(rows.begin(), rows.end() - 20);
+      } else if (!report && rows.size() > 20) rows.erase(rows.begin(), rows.end() - 20);
       const auto status = wlan.status(); unsigned failures = 0, eap845 = 0;
       for (const auto& r : rows) if (!r.success) { ++failures; if (r.error_code == 845) ++eap845; }
       if (quiet) return 0;
-      if (*format == OutputFormat::text) {
+      if (report) {
+        auto blackbox_records = blackbox.load_records(20);
+        if (requested_since) {
+          const auto cutoff = unix_now() - static_cast<std::int64_t>(*requested_since);
+          blackbox_records.erase(
+              std::remove_if(blackbox_records.begin(), blackbox_records.end(),
+                             [&](const auto& record) { return record.unix_time < cutoff; }),
+              blackbox_records.end());
+        }
+        const auto stats = compute_history_stats(rows);
+        const auto event_log = query_wlan_events(requested_since.value_or(86400), 100);
+        if (*format == OutputFormat::text) {
+          std::cout << "Wi-Fi diagnostic report\n\nCurrent connection\n";
+          print_status(status);
+          std::cout << "\nHistory statistics\n";
+          print_history_stats_text(stats);
+          std::cout << "\nBlack Box records\n";
+          if (blackbox_records.empty()) std::cout << "No Black Box failure records have been recorded.\n";
+          for (const auto& record : blackbox_records) print_blackbox_record_text(record);
+          std::cout << "\nWindows WLAN AutoConfig events\n";
+          if (!event_log.available) {
+            std::cout << event_log.message << " (error " << event_log.error_code << ")\n";
+          } else if (event_log.events.empty()) {
+            std::cout << "No related WLAN events were found in the requested period.\n";
+          } else {
+            for (const auto& event : event_log.events) {
+              std::cout << event.unix_time << "  event=" << event.event_id;
+              if (event.error_code) std::cout << " code=" << *event.error_code;
+              if (!event.ssid.empty()) std::cout << " ssid=" << event.ssid;
+              if (!event.bssid.empty()) std::cout << " bssid=" << event.bssid;
+              std::cout << "  " << event.description << "\n";
+              if (event.error_code == 845U)
+                std::cout << "  Error 845 is authentication evidence, not proof that an AP is defective or congested.\n";
+            }
+          }
+          std::cout << "\nConfig/history directory: " << storage.root().string() << "\n";
+        } else {
+          std::cout << "{\"schema_version\":1,\"command\":\"diagnose\",\"report\":true,\"data\":{"
+                    << "\"status\":" << status_json(status)
+                    << ",\"history_statistics\":" << history_stats_json(stats)
+                    << ",\"blackbox\":[";
+          for (std::size_t i = 0; i < blackbox_records.size(); ++i) {
+            if (i) std::cout << ',';
+            std::cout << blackbox_record_json(blackbox_records[i]);
+          }
+          std::cout << "],\"event_log\":{\"available\":" << (event_log.available ? "true" : "false")
+                    << ",\"error_code\":" << event_log.error_code
+                    << ",\"message\":\"" << json_escape(event_log.message) << "\",\"events\":[";
+          for (std::size_t i = 0; i < event_log.events.size(); ++i) {
+            if (i) std::cout << ',';
+            std::cout << wlan_event_json(event_log.events[i]);
+          }
+          std::cout << "]},\"config_directory\":\"" << json_escape(storage.root().string()) << "\"}}\n";
+        }
+      } else if (*format == OutputFormat::text) {
         print_status(status);
         std::cout << "Recent recorded attempts: " << rows.size() << ", failures: " << failures << "\n";
         if (eap845) std::cout << "Recorded error 845 count: " << eap845 << ". This is authentication evidence, not proof that an AP is defective or congested.\n";
