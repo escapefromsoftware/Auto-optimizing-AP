@@ -18,8 +18,10 @@ std::vector<RankedAccessPoint> Optimizer::rank(WlanClient& wlan, const std::stri
   return rank_access_points(std::move(aps));
 }
 
-OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& config, bool) {
+OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& config, bool, bool dry_run) {
   OptimizeResult out;
+  out.dry_run = dry_run;
+  out.threshold = config.min_improvement;
   auto ranked = rank(wlan, config.target_ssid);
   if (ranked.empty()) { out.message = "No BSS found for SSID '" + config.target_ssid + "'"; return out; }
   out.recommended = ranked.front();
@@ -32,6 +34,7 @@ OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& conf
   }
   if (current != ranked.end()) {
     const double improvement = ranked.front().scoring.score - current->scoring.score;
+    out.improvement = improvement;
     if (improvement < config.min_improvement) {
       std::ostringstream s;
       s << "No switch: expected improvement " << improvement << " is below hysteresis threshold "
@@ -40,6 +43,13 @@ OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& conf
       out.message = s.str();
       return out;
     }
+  }
+
+  out.would_switch = true;
+  if (dry_run) {
+    out.success = true;
+    out.message = "Dry run: would request connection to " + ranked.front().ap.bssid;
+    return out;
   }
 
   out.action_taken = true;

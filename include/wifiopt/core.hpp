@@ -42,6 +42,9 @@ struct AccessPoint {
   std::optional<std::int64_t> last_seen_unix;
   std::optional<std::uint64_t> receive_link_speed_bps;
   std::optional<std::uint64_t> transmit_link_speed_bps;
+  // Copied only after WlanClient validates ulIeOffset/ulIeSize against the
+  // owning WLAN_BSS_LIST buffer. Used by the read-only inspect command.
+  std::vector<std::uint8_t> raw_information_elements;
   unsigned cochannel_neighbors{};
   unsigned history_attempts{};
   unsigned history_successes{};
@@ -60,6 +63,14 @@ struct RankedAccessPoint {
 };
 
 struct ScorePolicy {
+  double rssi_weight{32.0};
+  double signal_quality_weight{13.0};
+  double bss_load_weight{20.0};
+  double bss_load_neutral_score{10.0};
+  double channel_interference_weight{8.0};
+  double channel_interference_decay{0.35};
+  double connection_history_weight{17.0};
+  double connection_history_neutral_score{8.5};
   double current_ap_bonus{8.0};
   double recent_failure_penalty{7.0};
 };

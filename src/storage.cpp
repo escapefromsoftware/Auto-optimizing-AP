@@ -234,15 +234,17 @@ void Storage::enrich_with_history(std::vector<AccessPoint>& aps) const {
 
 void Storage::record_observations(std::vector<AccessPoint>& aps) const {
   std::map<std::string, std::int64_t> observations;
-  std::ifstream in(root_ / "last_seen.tsv", std::ios::binary);
-  std::string line;
-  while (std::getline(in, line)) {
-    const auto fields = split_tabs(line);
-    if (fields.size() != 2 || !valid_bssid(fields[0])) continue;
-    try {
-      observations[normalize_bssid(fields[0])] = std::stoll(fields[1]);
-    } catch (...) { /* Ignore a damaged observation row. */ }
-  }
+  {
+    std::ifstream in(root_ / "last_seen.tsv", std::ios::binary);
+    std::string line;
+    while (std::getline(in, line)) {
+      const auto fields = split_tabs(line);
+      if (fields.size() != 2 || !valid_bssid(fields[0])) continue;
+      try {
+        observations[normalize_bssid(fields[0])] = std::stoll(fields[1]);
+      } catch (...) { /* Ignore a damaged observation row. */ }
+    }
+  } // Close the read handle before atomic_write replaces the same file.
 
   const auto observed_at = unix_now();
   for (auto& ap : aps) {

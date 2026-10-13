@@ -1,4 +1,5 @@
 #include "wifiopt/core.hpp"
+#include "wifiopt/cli.hpp"
 #include "wifiopt/storage.hpp"
 
 #include <windows.h>
@@ -232,6 +233,68 @@ void test_storage_target_ssid_update_preserves_other_fields() {
   }
   std::filesystem::remove_all(root);
 }
+
+void test_scan_json_round_trip_and_duration_parser() {
+  auto first = base_ap("00:00:00:00:00:11", -51);
+  first.ssid = "quoted \"network\"";
+  first.bss_load = BssLoad{12, 44, 300};
+  first.phy_standard = "802.11ax (HE)";
+  first.beacon_interval_tu = static_cast<std::uint16_t>(100);
+  first.last_seen_unix = 123456;
+  auto second = base_ap("00:00:00:00:00:12", -72);
+  const auto encoded = scan_json_document({first, second});
+  const auto decoded = parse_scan_json_document(encoded);
+  CHECK(decoded.size() == 2);
+  CHECK(decoded[0].ssid == first.ssid);
+  CHECK(decoded[0].bssid == first.bssid);
+  CHECK(decoded[0].bss_load.has_value());
+  CHECK(decoded[0].bss_load->channel_utilization == 44);
+  CHECK(decoded[0].phy_standard == first.phy_standard);
+  CHECK(decoded[0].last_seen_unix == first.last_seen_unix);
+  CHECK(parse_duration_seconds("30m") == 1800);
+  CHECK(parse_duration_seconds("7d") == 604800);
+  CHECK(parse_duration_seconds("5", true) == 5);
+  CHECK(!parse_duration_seconds("0s"));
+  CHECK(!parse_duration_seconds("bad"));
+}
+
+void test_configurable_scoring_is_default_compatible_and_changes_ranking() {
+  auto strong = base_ap("00:00:00:00:00:21", -45);
+  strong.bss_load = BssLoad{4, 240, 0};
+  auto clear = base_ap("00:00:00:00:00:22", -80);
+  clear.bss_load = BssLoad{4, 0, 0};
+
+  const auto implicit = rank_access_points({strong, clear});
+  const ScorePolicy defaults;
+  const auto explicit_defaults = rank_access_points({strong, clear}, defaults);
+  CHECK(implicit.size() == explicit_defaults.size());
+  CHECK(implicit[0].ap.bssid == explicit_defaults[0].ap.bssid);
+  CHECK(std::abs(implicit[0].scoring.score - explicit_defaults[0].scoring.score) < 0.000001);
+  CHECK(implicit[0].ap.bssid == strong.bssid);
+
+  const auto custom = parse_score_policy_json(
+      R"({"signal_rssi":0,"signal_quality":0,"bss_load":100,"bss_load_neutral":50})");
+  const auto reranked = rank_access_points({strong, clear}, custom);
+  CHECK(reranked[0].ap.bssid == clear.bssid);
+  const auto repeated = rank_access_points({strong, clear}, custom);
+  CHECK(repeated[0].ap.bssid == reranked[0].ap.bssid);
+  CHECK(std::abs(repeated[0].scoring.score - reranked[0].scoring.score) < 0.000001);
+}
+
+void test_history_statistics() {
+  const std::vector<ConnectionRecord> rows{
+      {100, "x", "00:00:00:00:00:01", "00:00:00:00:00:01", true, 0, "ok"},
+      {200, "x", "00:00:00:00:00:02", "00:00:00:00:00:02", false, 845, "fail"},
+      {300, "x", "00:00:00:00:00:02", "00:00:00:00:00:02", true, 0, "ok"}};
+  const auto stats = compute_history_stats(rows);
+  CHECK(stats.samples == 3);
+  CHECK(stats.first_unix == 100);
+  CHECK(stats.last_unix == 300);
+  CHECK(stats.ap_switches == 1);
+  CHECK(stats.by_bssid.at("00:00:00:00:00:02").attempts == 2);
+  CHECK(stats.by_bssid.at("00:00:00:00:00:02").successes == 1);
+  CHECK(stats.error_counts.at(845) == 1);
+}
 } // namespace
 
 int main() {
@@ -248,7 +311,10 @@ int main() {
   test_retry_limiter();
   test_storage_initial_off_and_history();
   test_storage_target_ssid_update_preserves_other_fields();
+  test_scan_json_round_trip_and_duration_parser();
+  test_configurable_scoring_is_default_compatible_and_changes_ranking();
+  test_history_statistics();
   if (failures) { std::cerr << failures << " test assertion(s) failed\n"; return 1; }
-  std::cout << "All 13 test groups passed\n";
+  std::cout << "All 16 test groups passed\n";
   return 0;
 }
