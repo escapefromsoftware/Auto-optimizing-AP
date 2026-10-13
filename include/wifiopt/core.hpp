@@ -15,6 +15,14 @@ struct BssLoad {
   std::uint16_t available_admission_capacity{};
 };
 
+struct InformationElements {
+  bool ht_capabilities{};
+  bool vht_capabilities{};
+  bool extended_capabilities{};
+  std::optional<bool> bss_transition_management;
+  unsigned vendor_specific_count{};
+};
+
 struct AccessPoint {
   std::string ssid;
   std::string bssid;
@@ -24,6 +32,16 @@ struct AccessPoint {
   int channel{};
   bool current{};
   std::optional<BssLoad> bss_load;
+  std::optional<std::string> phy_standard;
+  std::optional<std::uint16_t> beacon_interval_tu;
+  std::optional<bool> ht_capabilities;
+  std::optional<bool> vht_capabilities;
+  std::optional<bool> extended_capabilities;
+  std::optional<bool> bss_transition_management;
+  std::optional<unsigned> vendor_specific_ie_count;
+  std::optional<std::int64_t> last_seen_unix;
+  std::optional<std::uint64_t> receive_link_speed_bps;
+  std::optional<std::uint64_t> transmit_link_speed_bps;
   unsigned cochannel_neighbors{};
   unsigned history_attempts{};
   unsigned history_successes{};
@@ -32,6 +50,7 @@ struct AccessPoint {
 
 struct ScoreResult {
   double score{};
+  double quality_score{};
   std::vector<std::string> reasons;
 };
 
@@ -73,6 +92,8 @@ struct DaemonState {
 };
 
 std::optional<BssLoad> parse_bss_load(std::span<const std::uint8_t> ies) noexcept;
+std::optional<InformationElements> parse_information_elements(
+    std::span<const std::uint8_t> ies) noexcept;
 int frequency_to_channel(std::uint32_t frequency_khz) noexcept;
 bool valid_bssid(const std::string& value) noexcept;
 std::string normalize_bssid(std::string value);
