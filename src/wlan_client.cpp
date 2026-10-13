@@ -184,7 +184,8 @@ ConnectionStatus WlanClient::status() const {
 }
 
 std::vector<AccessPoint> WlanClient::scan(const std::optional<std::string>& filter,
-                                          std::chrono::milliseconds wait) {
+                                          std::chrono::milliseconds wait,
+                                          ConnectionStatus* observed_status) {
   const auto ifaces = interfaces();
   if (ifaces.empty()) throw std::runtime_error("No wireless LAN interface was found");
   DOT11_SSID wanted{};
@@ -207,6 +208,7 @@ std::vector<AccessPoint> WlanClient::scan(const std::optional<std::string>& filt
   std::this_thread::sleep_for(wait);
 
   const auto connected = status();
+  if (observed_status) *observed_status = connected;
   std::vector<AccessPoint> result;
   std::set<std::string> seen;
   for (const auto& iface : ifaces) {

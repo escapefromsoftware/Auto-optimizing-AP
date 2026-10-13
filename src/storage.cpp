@@ -96,7 +96,9 @@ std::optional<bool> json_bool(const std::string& text, const std::string& key) {
   return std::nullopt;
 }
 
-void atomic_write(const std::filesystem::path& path, const std::string& text) {
+} // namespace
+
+void atomic_write_file(const std::filesystem::path& path, std::string_view text) {
   std::filesystem::create_directories(path.parent_path());
   auto tmp = path;
   tmp += ".tmp";
@@ -113,8 +115,6 @@ void atomic_write(const std::filesystem::path& path, const std::string& text) {
     throw std::runtime_error("cannot replace " + path.string() + ": " + std::to_string(code));
   }
 }
-
-} // namespace
 
 std::int64_t unix_now() noexcept {
   return std::chrono::duration_cast<std::chrono::seconds>(
@@ -167,7 +167,7 @@ void Storage::save_config(const AutoConfig& c) const {
       << ",\n  \"min_improvement\": " << c.min_improvement
       << ",\n  \"cooldown_seconds\": " << c.cooldown_seconds
       << ",\n  \"target_ssid\": \"" << json_escape(c.target_ssid) << "\"\n}\n";
-  atomic_write(root_ / "config.json", out.str());
+  atomic_write_file(root_ / "config.json", out.str());
 }
 
 DaemonState Storage::load_daemon_state() const {
@@ -191,7 +191,7 @@ void Storage::save_daemon_state(const DaemonState& s) const {
       << ",\n  \"ssid\": \"" << json_escape(s.ssid) << "\""
       << ",\n  \"bssid\": \"" << json_escape(s.bssid) << "\""
       << ",\n  \"detail\": \"" << json_escape(s.detail) << "\"\n}\n";
-  atomic_write(root_ / "daemon_state.json", out.str());
+  atomic_write_file(root_ / "daemon_state.json", out.str());
 }
 
 void Storage::append_history(const ConnectionRecord& r) const {
@@ -244,7 +244,7 @@ void Storage::record_observations(std::vector<AccessPoint>& aps) const {
         observations[normalize_bssid(fields[0])] = std::stoll(fields[1]);
       } catch (...) { /* Ignore a damaged observation row. */ }
     }
-  } // Close the read handle before atomic_write replaces the same file.
+  } // Close the read handle before atomic_write_file replaces the same file.
 
   const auto observed_at = unix_now();
   for (auto& ap : aps) {
@@ -258,7 +258,7 @@ void Storage::record_observations(std::vector<AccessPoint>& aps) const {
   for (const auto& [bssid, timestamp] : observations) {
     out << bssid << '\t' << timestamp << '\n';
   }
-  atomic_write(root_ / "last_seen.tsv", out.str());
+  atomic_write_file(root_ / "last_seen.tsv", out.str());
 }
 
 } // namespace wifiopt

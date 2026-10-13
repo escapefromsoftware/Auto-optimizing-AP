@@ -3,6 +3,7 @@
 #include "wifiopt/core.hpp"
 
 #include <filesystem>
+#include <string_view>
 #include <vector>
 
 namespace wifiopt {
@@ -24,5 +25,6 @@ class Storage {
 };
 
 std::int64_t unix_now() noexcept;
+void atomic_write_file(const std::filesystem::path& path, std::string_view text);
 
 } // namespace wifiopt

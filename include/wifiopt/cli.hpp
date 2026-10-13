@@ -11,6 +11,8 @@
 
 namespace wifiopt {
 
+struct BlackBoxRecord;
+
 enum class OutputFormat { text, json, csv, ndjson };
 
 std::optional<OutputFormat> parse_output_format(std::string_view value) noexcept;
@@ -42,5 +44,7 @@ struct HistoryStats {
 };
 
 HistoryStats compute_history_stats(const std::vector<ConnectionRecord>& rows);
+std::string blackbox_record_json(const BlackBoxRecord& record);
+BlackBoxRecord parse_blackbox_record_json(std::string_view text);
 
 } // namespace wifiopt

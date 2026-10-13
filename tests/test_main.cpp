@@ -1,5 +1,7 @@
 #include "wifiopt/core.hpp"
+#include "wifiopt/blackbox.hpp"
 #include "wifiopt/cli.hpp"
+#include "wifiopt/eventlog.hpp"
 #include "wifiopt/storage.hpp"
 
 #include <windows.h>
@@ -295,6 +297,92 @@ void test_history_statistics() {
   CHECK(stats.by_bssid.at("00:00:00:00:00:02").successes == 1);
   CHECK(stats.error_counts.at(845) == 1);
 }
+
+void test_blackbox_ring_and_disconnect_detection() {
+  const auto root = std::filesystem::temp_directory_path() /
+                    ("wifiopt-blackbox-ring-" + std::to_string(GetCurrentProcessId()));
+  std::filesystem::remove_all(root);
+  {
+    BlackBox blackbox(root, 3, 10);
+    for (std::int64_t timestamp = 1; timestamp <= 4; ++timestamp) {
+      WifiObservation observation{timestamp, "test", "00:00:00:00:00:01", -50,
+                                  80, true};
+      CHECK(!blackbox.observe(observation));
+    }
+    const auto ring = blackbox.observations();
+    CHECK(ring.size() == 3);
+    CHECK(ring.front().unix_time == 2);
+
+    const WifiObservation disconnected{5, {}, {}, -100, 0, false};
+    const auto failure = blackbox.observe(disconnected);
+    CHECK(failure.has_value());
+    CHECK(failure->event_type == BlackBoxEventType::unexpected_disconnect);
+    CHECK(failure->observations_before.size() == 3);
+    CHECK(failure->related_bssid == "00:00:00:00:00:01");
+    CHECK(blackbox.load_records().size() == 1);
+
+    CHECK(!blackbox.observe({6, "test", "00:00:00:00:00:01", -55, 70, true}));
+    CHECK(!blackbox.observe({7, {}, {}, -100, 0, false}, true));
+    CHECK(blackbox.load_records().size() == 1);
+  }
+  std::filesystem::remove_all(root);
+}
+
+void test_blackbox_rotation_and_bssid_attribution() {
+  const auto root = std::filesystem::temp_directory_path() /
+                    ("wifiopt-blackbox-rotation-" + std::to_string(GetCurrentProcessId()));
+  std::filesystem::remove_all(root);
+  {
+    BlackBox blackbox(root, 2, 3);
+    for (std::int64_t timestamp = 100; timestamp < 105; ++timestamp) {
+      const auto record = blackbox.record_connection(
+          {timestamp, "test", "00:00:00:00:00:10", {}, false, 845, "EAP failure"});
+      CHECK(record.has_value());
+      CHECK(record->related_bssid == "00:00:00:00:00:10");
+      CHECK(record->possible_cause.find("does not by itself prove") != std::string::npos);
+    }
+    const auto records = blackbox.load_records();
+    CHECK(records.size() == 3);
+    CHECK(records.front().unix_time == 102);
+    CHECK(records.back().unix_time == 104);
+
+    const auto unknown = blackbox.record_connection(
+        {200, "test", {}, {}, false, 1, "unknown target"});
+    CHECK(unknown.has_value());
+    CHECK(unknown->related_bssid.empty());
+    CHECK(unknown->requested_bssid.empty());
+    CHECK(unknown->actual_bssid.empty());
+
+    const auto mismatch = blackbox.record_connection(
+        {201, "test", "00:00:00:00:00:20", "00:00:00:00:00:21", true, 0,
+         "different AP"});
+    CHECK(mismatch.has_value());
+    CHECK(mismatch->event_type == BlackBoxEventType::ap_switch_failure);
+    CHECK(mismatch->related_bssid == "00:00:00:00:00:20");
+  }
+  std::filesystem::remove_all(root);
+}
+
+void test_eventlog_xml_parser() {
+  const auto parsed = parse_wlan_event_xml(R"xml(
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System><EventID>12013</EventID><TimeCreated SystemTime="2026-10-13T01:02:03.456Z"/></System>
+  <EventData>
+    <Data Name="SSID">Corp&amp;Lab</Data>
+    <Data Name="BSSID">98-8f-00-41-5a-e4</Data>
+    <Data Name="ReasonCode">845</Data>
+    <Data Name="FailureReason">802.1X/EAP authentication failed</Data>
+  </EventData>
+</Event>)xml");
+  CHECK(parsed.has_value());
+  CHECK(parsed->event_id == 12013);
+  CHECK(parsed->unix_time > 0);
+  CHECK(parsed->ssid == "Corp&Lab");
+  CHECK(parsed->bssid == "98:8F:00:41:5A:E4");
+  CHECK(parsed->error_code == 845U);
+  CHECK(parsed->description == "802.1X/EAP authentication failed");
+  CHECK(!parse_wlan_event_xml("<Event><System/></Event>"));
+}
 } // namespace
 
 int main() {
@@ -314,7 +402,10 @@ int main() {
   test_scan_json_round_trip_and_duration_parser();
   test_configurable_scoring_is_default_compatible_and_changes_ranking();
   test_history_statistics();
+  test_blackbox_ring_and_disconnect_detection();
+  test_blackbox_rotation_and_bssid_attribution();
+  test_eventlog_xml_parser();
   if (failures) { std::cerr << failures << " test assertion(s) failed\n"; return 1; }
-  std::cout << "All 16 test groups passed\n";
+  std::cout << "All 19 test groups passed\n";
   return 0;
 }

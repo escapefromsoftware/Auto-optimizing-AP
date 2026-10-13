@@ -15,15 +15,17 @@ cmake_policy(SET CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 add_library(wifiopt_core
+  src/blackbox.cpp
   src/cli.cpp
   src/core.cpp
+  src/eventlog.cpp
   src/storage.cpp
   src/wlan_client.cpp
   src/optimizer.cpp)
 target_include_directories(wifiopt_core PUBLIC include)
 target_compile_definitions(wifiopt_core PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(wifiopt_core PRIVATE /W4 /permissive- /EHsc)
-target_link_libraries(wifiopt_core PUBLIC wlanapi ole32 iphlpapi)
+target_link_libraries(wifiopt_core PUBLIC wlanapi ole32 iphlpapi wevtapi)
 
 add_executable(wifiopt src/main.cpp)
 target_compile_definitions(wifiopt PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

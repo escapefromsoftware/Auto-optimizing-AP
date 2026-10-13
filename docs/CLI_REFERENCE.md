@@ -10,7 +10,7 @@
 - `--quiet`: 正常時の標準出力を抑止する。終了コードと標準エラーは維持する。
 - `--no-color`: 将来のカラー出力抑止用。現在の出力は無色なので no-op。
 
-`inspect`、`optimize`、`simulate` は `text|json`、`watch` は `text|ndjson` に対応します。未対応形式は終了コード2です。`diagnose --json` は `--format json` の別名です。
+`inspect`、`optimize`、`simulate`、`blackbox` は `text|json`、`watch` は `text|ndjson` に対応します。`diagnose --report`も`text|json`だけに対応します。未対応形式は終了コード2です。`diagnose --json` は `--format json` の別名です。
 
 ## コマンド一覧
 
@@ -64,9 +64,27 @@ wifiopt scan --format csv
 
 接続所要時間は履歴に記録されていないため、テキストでは `unavailable (not recorded)`、JSONでは `average_connection_time_ms: null` です。
 
+### `blackbox [--since 30m|24h|7d] [--format text|json]`
+
+永続化済みのWi-Fi Black Box障害レコードを表示します。各レコードには障害種別、時刻、エラーコード、明示的に取得できた場合だけの関連BSSID、障害前の観測、原因候補、推奨対処が含まれます。`--since`は指定期間より新しいレコードだけへ絞り込みます。省略時は保存上限内の全レコード（既定最大500件）です。
+
+```powershell
+wifiopt blackbox
+wifiopt blackbox --since 24h --format json
+```
+
 ### `diagnose [--since 30m|24h|7d] [--json]`
 
 現在状態と接続試行の件数、失敗数、エラー845件数、保存ディレクトリを表示します。`--since` は正の整数と `s`、`m`、`h`、`d` のいずれかからなる相対期間です。省略時は従来どおり直近20件です。不正値は終了コード2です。
+
+`--report [--format text|json]`を付けると、現在の接続状態、`history --stats`と同じ集計、直近20件のBlack Boxレコード、Windows WLAN AutoConfig Operationalログの関連イベントを1つのレポートにします。`--since`省略時、イベントログは直近24時間、履歴統計は保存済み全履歴が対象です。イベントログが権限不足、チャネル不在、非対応環境などで読めない場合も、理由をレポート内に記して現在状態・履歴・Black Boxの出力を続けます。
+
+```powershell
+wifiopt diagnose --report
+wifiopt diagnose --report --since 7d --format json
+```
+
+`--report`なしの既定出力は変更されません。
 
 ### `simulate --input FILE [--weights FILE] [--compare] [--explain] [--format text|json]`
 
