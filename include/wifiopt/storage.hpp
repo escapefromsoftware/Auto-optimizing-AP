@@ -18,6 +18,7 @@ class Storage {
   void append_history(const ConnectionRecord& record) const;
   std::vector<ConnectionRecord> load_history(std::size_t limit = 200) const;
   void enrich_with_history(std::vector<AccessPoint>& aps) const;
+  void record_observations(std::vector<AccessPoint>& aps) const;
  private:
   std::filesystem::path root_;
 };

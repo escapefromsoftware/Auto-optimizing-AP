@@ -1,6 +1,8 @@
 #include "wifiopt/wlan_client.hpp"
 
 #include <objbase.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
 
 #include <algorithm>
 #include <array>
@@ -60,6 +62,23 @@ bool parse_bssid(const std::string& text, DOT11_MAC_ADDRESS& mac) {
 }
 
 bool same_guid(const GUID& a, const GUID& b) noexcept { return InlineIsEqualGUID(a, b) != 0; }
+
+std::optional<std::string> phy_standard(DOT11_PHY_TYPE type) {
+  switch (type) {
+    case dot11_phy_type_fhss: return "FHSS (legacy 802.11)";
+    case dot11_phy_type_dsss: return "DSSS (legacy 802.11)";
+    case dot11_phy_type_irbaseband: return "Infrared (legacy 802.11)";
+    case dot11_phy_type_ofdm: return "802.11a";
+    case dot11_phy_type_hrdsss: return "802.11b";
+    case dot11_phy_type_erp: return "802.11g";
+    case dot11_phy_type_ht: return "802.11n (HT)";
+    case dot11_phy_type_vht: return "802.11ac (VHT)";
+    case dot11_phy_type_dmg: return "802.11ad (DMG)";
+    case dot11_phy_type_he: return "802.11ax (HE)";
+    case dot11_phy_type_eht: return "802.11be (EHT)";
+    default: return std::nullopt;
+  }
+}
 
 std::wstring find_profile(HANDLE handle, const GUID& guid, const std::string& ssid) {
   PWLAN_PROFILE_INFO_LIST raw = nullptr;
@@ -150,6 +169,15 @@ ConnectionStatus WlanClient::status() const {
       wlan_ptr<LONG> held(rssi);
       result.rssi_dbm = *held;
     }
+    NET_LUID luid{};
+    if (ConvertInterfaceGuidToLuid(&iface.guid, &luid) == NO_ERROR) {
+      MIB_IF_ROW2 row{};
+      row.InterfaceLuid = luid;
+      if (GetIfEntry2(&row) == NO_ERROR) {
+        result.receive_link_speed_bps = row.ReceiveLinkSpeed;
+        result.transmit_link_speed_bps = row.TransmitLinkSpeed;
+      }
+    }
     return result;
   }
   return {};
@@ -203,9 +231,30 @@ std::vector<AccessPoint> WlanClient::scan(const std::optional<std::string>& filt
       ap.frequency_khz = entry.ulChCenterFrequency;
       ap.channel = frequency_to_channel(ap.frequency_khz);
       ap.current = connected.connected && requested_bssid_matched(ap.bssid, connected.bssid);
-      if (entry.ulIeSize > 0 && entry.ulIeOffset >= sizeof(WLAN_BSS_ENTRY)) {
-        const auto* base = reinterpret_cast<const std::uint8_t*>(&entry);
-        ap.bss_load = parse_bss_load({base + entry.ulIeOffset, entry.ulIeSize});
+      if (ap.current) {
+        ap.receive_link_speed_bps = connected.receive_link_speed_bps;
+        ap.transmit_link_speed_bps = connected.transmit_link_speed_bps;
+      }
+      ap.phy_standard = phy_standard(entry.dot11BssPhyType);
+      ap.beacon_interval_tu = entry.usBeaconPeriod;
+      const auto* list_base = reinterpret_cast<const std::uint8_t*>(list.get());
+      const auto* base = reinterpret_cast<const std::uint8_t*>(&entry);
+      const auto entry_offset = static_cast<std::size_t>(base - list_base);
+      const auto total_size = static_cast<std::size_t>(list->dwTotalSize);
+      const auto ie_offset = static_cast<std::size_t>(entry.ulIeOffset);
+      const auto ie_size = static_cast<std::size_t>(entry.ulIeSize);
+      if (ie_size > 0 && ie_offset >= sizeof(WLAN_BSS_ENTRY) &&
+          entry_offset <= total_size && ie_offset <= total_size - entry_offset &&
+          ie_size <= total_size - entry_offset - ie_offset) {
+        const std::span<const std::uint8_t> ies{base + ie_offset, ie_size};
+        ap.bss_load = parse_bss_load(ies);
+        if (const auto parsed = parse_information_elements(ies)) {
+          ap.ht_capabilities = parsed->ht_capabilities;
+          ap.vht_capabilities = parsed->vht_capabilities;
+          ap.extended_capabilities = parsed->extended_capabilities;
+          ap.bss_transition_management = parsed->bss_transition_management;
+          ap.vendor_specific_ie_count = parsed->vendor_specific_count;
+        }
       }
       result.push_back(std::move(ap));
     }

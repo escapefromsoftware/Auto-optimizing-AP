@@ -232,4 +232,31 @@ void Storage::enrich_with_history(std::vector<AccessPoint>& aps) const {
   }
 }
 
+void Storage::record_observations(std::vector<AccessPoint>& aps) const {
+  std::map<std::string, std::int64_t> observations;
+  std::ifstream in(root_ / "last_seen.tsv", std::ios::binary);
+  std::string line;
+  while (std::getline(in, line)) {
+    const auto fields = split_tabs(line);
+    if (fields.size() != 2 || !valid_bssid(fields[0])) continue;
+    try {
+      observations[normalize_bssid(fields[0])] = std::stoll(fields[1]);
+    } catch (...) { /* Ignore a damaged observation row. */ }
+  }
+
+  const auto observed_at = unix_now();
+  for (auto& ap : aps) {
+    if (!valid_bssid(ap.bssid)) continue;
+    const auto key = normalize_bssid(ap.bssid);
+    observations[key] = observed_at;
+    ap.last_seen_unix = observed_at;
+  }
+
+  std::ostringstream out;
+  for (const auto& [bssid, timestamp] : observations) {
+    out << bssid << '\t' << timestamp << '\n';
+  }
+  atomic_write(root_ / "last_seen.tsv", out.str());
+}
+
 } // namespace wifiopt

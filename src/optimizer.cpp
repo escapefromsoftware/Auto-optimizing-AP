@@ -12,6 +12,7 @@ namespace wifiopt {
 std::vector<RankedAccessPoint> Optimizer::rank(WlanClient& wlan, const std::string& ssid) {
   // Scan every SSID so co-channel neighbor counts include other networks too.
   auto aps = wlan.scan();
+  storage_.record_observations(aps);
   aps.erase(std::remove_if(aps.begin(), aps.end(), [&](const auto& ap) { return ap.ssid != ssid; }), aps.end());
   storage_.enrich_with_history(aps);
   return rank_access_points(std::move(aps));

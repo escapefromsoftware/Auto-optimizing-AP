@@ -43,6 +43,7 @@ $resolvedDataDirectory = (Resolve-Path -LiteralPath $DataDirectory).Path
 $previousDataDirectory = $env:WIFIOPT_DATA_DIR
 $process = $null
 $window = [IntPtr]::Zero
+$detailsWindow = [IntPtr]::Zero
 
 try {
   $env:WIFIOPT_DATA_DIR = $resolvedDataDirectory
@@ -50,6 +51,7 @@ try {
   $deadline = [DateTime]::UtcNow.AddSeconds(10)
   do {
     $script:window = [IntPtr]::Zero
+    $script:detailsWindow = [IntPtr]::Zero
     $findWindow = [WifiOptSmokeNative+EnumWindowsProc]{
       param([IntPtr]$candidate, [IntPtr]$parameter)
       [uint32]$candidateProcessId = 0
@@ -59,19 +61,22 @@ try {
         [void][WifiOptSmokeNative]::GetClassName($candidate, $className, $className.Capacity)
         if ($className.ToString() -eq 'SmartWifiApOptimizerGuiWindow-v1') {
           $script:window = $candidate
-          return $false
+        } elseif ($className.ToString() -eq 'SmartWifiApOptimizerDetailsWindow-v1') {
+          $script:detailsWindow = $candidate
         }
       }
       return $true
     }
     [void][WifiOptSmokeNative]::EnumWindows($findWindow, [IntPtr]::Zero)
     $window = $script:window
-    if ($window -ne [IntPtr]::Zero) { break }
+    $detailsWindow = $script:detailsWindow
+    if ($window -ne [IntPtr]::Zero -and $detailsWindow -ne [IntPtr]::Zero) { break }
     if ($process.HasExited) { throw "GUI exited early with code $($process.ExitCode)" }
     Start-Sleep -Milliseconds 100
   } while ([DateTime]::UtcNow -lt $deadline)
 
   if ($window -eq [IntPtr]::Zero) { throw 'Main GUI window was not found' }
+  if ($detailsWindow -eq [IntPtr]::Zero) { throw 'AP details window was not created' }
 
   $children = [Collections.Generic.List[object]]::new()
   $enumerateChild = [WifiOptSmokeNative+EnumWindowsProc]{
@@ -91,8 +96,25 @@ try {
 
   $combo = $children | Where-Object { $_.Class -eq 'ComboBox' -and $_.Id -eq 1008 }
   $apply = $children | Where-Object { $_.Class -eq 'Button' -and $_.Id -eq 1009 -and $_.Text -eq 'Apply' }
+  $details = $children | Where-Object { $_.Class -eq 'Button' -and $_.Id -eq 1011 -and $_.Text -eq 'Details' }
   if (-not $combo) { throw 'Target SSID ComboBox (ID 1008) was not found' }
   if (-not $apply) { throw 'Apply button (ID 1009) was not found' }
+  if (-not $details) { throw 'Details button (ID 1011) was not found' }
+
+  $detailsChildren = [Collections.Generic.List[object]]::new()
+  $enumerateDetailsChild = [WifiOptSmokeNative+EnumWindowsProc]{
+    param([IntPtr]$child, [IntPtr]$parameter)
+    $className = [Text.StringBuilder]::new(256)
+    [void][WifiOptSmokeNative]::GetClassName($child, $className, $className.Capacity)
+    $detailsChildren.Add([pscustomobject]@{
+      Class = $className.ToString()
+      Id = [WifiOptSmokeNative]::GetDlgCtrlID($child)
+    })
+    return $true
+  }
+  [void][WifiOptSmokeNative]::EnumChildWindows($detailsWindow, $enumerateDetailsChild, [IntPtr]::Zero)
+  $detailsText = $detailsChildren | Where-Object { $_.Class -eq 'Edit' -and $_.Id -eq 1012 }
+  if (-not $detailsText) { throw 'AP details read-only text control (ID 1012) was not found' }
 
   [void][WifiOptSmokeNative]::SendMessage($window, 0x0111, [IntPtr]1006, [IntPtr]::Zero)
   if (-not $process.WaitForExit(15000)) { throw 'GUI did not exit within 15 seconds' }
@@ -101,6 +123,8 @@ try {
   "PID=$($process.Id) WINDOW=$window"
   "COMBOBOX_ID=$($combo.Id) CLASS=$($combo.Class) TEXT=$($combo.Text)"
   "APPLY_ID=$($apply.Id) CLASS=$($apply.Class) TEXT=$($apply.Text)"
+  "DETAILS_ID=$($details.Id) CLASS=$($details.Class) TEXT=$($details.Text)"
+  "DETAILS_WINDOW=$detailsWindow DETAILS_TEXT_ID=$($detailsText.Id) CLASS=$($detailsText.Class)"
   "EXIT_CODE=$($process.ExitCode)"
 } finally {
   if ($null -ne $process -and -not $process.HasExited) {

@@ -2,6 +2,11 @@
 
 - Windows 11の位置情報サービスとデスクトップアプリ位置情報アクセスが無効だと、Native Wi-Fi APIはBSS一覧をエラー5で拒否する。管理者昇格だけでは代替できない。
 - BSS Load IEをドライバーが公開しないAPでは実利用率を取得できない。本ツールは中立点と欠損表示を使い、混雑度を捏造しない。
+- HT/VHTはIEの存在だけを検出し、MCS、チャネル幅、空間ストリーム等はデコードしない。HE/EHT CapabilitiesはExtension Element（ID 255）の拡張ID、世代別可変長構造、仕様改訂の扱いが複雑で、誤った実測値を表示するリスクを避けるため未対応である。
+- BSS Transition ManagementはExtended Capabilitiesが3オクテット以上ある場合だけbit 19を解釈する。IE未提供・短縮時は「非対応」ではなく取得不可とする。
+- `WLAN_AVAILABLE_NETWORK`の既定認証/暗号アルゴリズムはSSID単位の情報であり、`WLAN_BSS_ENTRY`にはBSSID単位の対応フィールドがない。本版のAP詳細では認証方式・セキュリティ方式をBSSID実測値として推測せず「取得不可（Windows APIはSSID単位でのみ提供）」と表示する。RSN/WPA IEの独自デコードは未実装である。
+- 最終検出日時はAPが広告するビーコンTimestampではなく、本ツールがスキャン結果としてBSSIDを観測し`last_seen.tsv`へ保存したローカル時刻である。同時実行プロセス間の厳密なファイルロックや古いBSSID記録の自動削除は未実装である。
+- リンク速度は現在接続中のWLANインターフェイスについて`GetIfEntry2`が返す公称送受信速度であり、実効スループットではない。未接続BSSIDの速度は取得できない。
 - Station Countは関連付け端末数で、通信量・バックホール混雑・認証サーバー状態を表さない。
 - `pDesiredBssidList`は希望であり、Windows、ドライバー、802.11k/v/rローミング判断により別BSSIDになる場合がある。実BSSID一致時だけ指定成功とする。
 - Intel BE201固有の320 MHz幅、MLOリンク単位情報、PHY速度は本版のスコアに含めない。中心周波数から主チャネル相当だけを表示する。

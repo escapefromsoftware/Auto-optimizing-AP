@@ -7,6 +7,7 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cwctype>
 #include <ctime>
 #include <filesystem>
@@ -27,6 +28,7 @@ using namespace wifiopt;
 
 constexpr wchar_t kMainWindowClass[] = L"SmartWifiApOptimizerGuiWindow-v1";
 constexpr wchar_t kHistoryWindowClass[] = L"SmartWifiApOptimizerHistoryWindow-v1";
+constexpr wchar_t kDetailsWindowClass[] = L"SmartWifiApOptimizerDetailsWindow-v1";
 constexpr wchar_t kWindowTitle[] = L"Smart Wi-Fi AP Optimizer";
 constexpr UINT kTrayCallback = WM_APP + 1;
 constexpr UINT kAsyncComplete = WM_APP + 2;
@@ -42,6 +44,8 @@ enum ControlId : int {
   id_history_list = 1007,
   id_target_combo = 1008,
   id_target_apply = 1009,
+  id_details = 1011,
+  id_details_text = 1012,
 };
 
 enum class AsyncKind { refresh, connect, automatic };
@@ -117,6 +121,18 @@ std::wstring history_time(std::int64_t unix_time) {
   return buffer;
 }
 
+std::wstring available_bool(const std::optional<bool>& value) {
+  if (!value) return L"取得不可";
+  return *value ? L"あり" : L"なし";
+}
+
+std::wstring frequency_band(std::uint32_t frequency_khz) {
+  const auto mhz = frequency_khz / 1000U;
+  if (mhz < 3000U) return L"2.4 GHz";
+  if (mhz < 5925U) return L"5 GHz";
+  return L"6 GHz";
+}
+
 class GuiApp {
  public:
   explicit GuiApp(HINSTANCE instance)
@@ -147,10 +163,16 @@ class GuiApp {
     history_class.lpszClassName = kHistoryWindowClass;
     if (!RegisterClassExW(&history_class) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
 
+    WNDCLASSEXW details_class = main_class;
+    details_class.lpfnWndProc = &GuiApp::details_window_proc;
+    details_class.lpszClassName = kDetailsWindowClass;
+    if (!RegisterClassExW(&details_class) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
+
     window_ = CreateWindowExW(0, kMainWindowClass, kWindowTitle, WS_OVERLAPPEDWINDOW,
                               CW_USEDEFAULT, CW_USEDEFAULT, 1000, 650, nullptr, nullptr,
                               instance_, this);
     if (!window_) return false;
+    if (!ensure_details_window()) return false;
     ShowWindow(window_, show_command);
     UpdateWindow(window_);
     request_refresh();
@@ -219,6 +241,41 @@ class GuiApp {
     }
   }
 
+  static LRESULT CALLBACK details_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_NCCREATE) {
+      const auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+      auto* app = static_cast<GuiApp*>(create->lpCreateParams);
+      SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+    }
+    auto* app = app_from(window);
+    if (!app) return DefWindowProcW(window, message, wparam, lparam);
+    switch (message) {
+      case WM_CREATE:
+        app->details_text_ = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_LEFT | ES_MULTILINE |
+                ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_READONLY,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(id_details_text), app->instance_, nullptr);
+        app->apply_font(app->details_text_);
+        return app->details_text_ ? 0 : -1;
+      case WM_SIZE:
+        MoveWindow(app->details_text_, scaled(window, 10), scaled(window, 10),
+                   (std::max)(0, static_cast<int>(LOWORD(lparam)) - scaled(window, 20)),
+                   (std::max)(0, static_cast<int>(HIWORD(lparam)) - scaled(window, 20)), TRUE);
+        return 0;
+      case WM_CLOSE:
+        ShowWindow(window, SW_HIDE);
+        return 0;
+      case WM_NCDESTROY:
+        app->details_window_ = nullptr;
+        app->details_text_ = nullptr;
+        SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+        return DefWindowProcW(window, message, wparam, lparam);
+      default:
+        return DefWindowProcW(window, message, wparam, lparam);
+    }
+  }
+
   LRESULT handle_main_message(UINT message, WPARAM wparam, LPARAM lparam) {
     if (taskbar_created_message_ != 0 && message == taskbar_created_message_) {
       tray_added_ = false;
@@ -253,7 +310,16 @@ class GuiApp {
       case WM_COMMAND:
         handle_command(LOWORD(wparam));
         return 0;
+      case WM_NOTIFY: {
+        const auto* header = reinterpret_cast<const NMHDR*>(lparam);
+        if (header && header->idFrom == id_ranking && header->code == NM_DBLCLK) {
+          show_selected_details();
+          return 0;
+        }
+        return DefWindowProcW(window_, message, wparam, lparam);
+      }
       case WM_CLOSE:
+        if (details_window_) ShowWindow(details_window_, SW_HIDE);
         ShowWindow(window_, tray_added_ ? SW_HIDE : SW_MINIMIZE);
         return 0;
       case WM_ENDSESSION:
@@ -269,6 +335,7 @@ class GuiApp {
         shutting_down_.store(true);
         if (worker_.joinable()) worker_.join();
         if (history_window_) DestroyWindow(history_window_);
+        if (details_window_) DestroyWindow(details_window_);
         remove_tray_icon();
         if (font_) {
           DeleteObject(font_);
@@ -305,6 +372,8 @@ class GuiApp {
     add_ranking_columns();
     connect_button_ = make_control(0, L"BUTTON", L"Connect to selected AP", BS_PUSHBUTTON,
                                    0, 0, 0, 0, id_connect);
+    details_button_ = make_control(0, L"BUTTON", L"Details", BS_PUSHBUTTON,
+                                   0, 0, 0, 0, id_details);
     auto_button_ = make_control(0, L"BUTTON", L"Automatic optimization: ...", BS_PUSHBUTTON,
                                 0, 0, 0, 0, id_auto);
     history_button_ = make_control(0, L"BUTTON", L"History", BS_PUSHBUTTON,
@@ -325,7 +394,8 @@ class GuiApp {
   void add_ranking_columns() const {
     struct Column { const wchar_t* name; int width; };
     const Column columns[]{{L"BSSID", 150}, {L"SSID", 170}, {L"RSSI (dBm)", 90},
-                           {L"Quality (%)", 90}, {L"Channel", 75}, {L"Score", 75},
+                           {L"Quality (%)", 90}, {L"Channel", 75},
+                           {L"Quality Score", 100}, {L"Selection Score", 110},
                            {L"Current", 75}};
     for (int index = 0; index < static_cast<int>(std::size(columns)); ++index) {
       LVCOLUMNW column{};
@@ -358,9 +428,11 @@ class GuiApp {
     MoveWindow(ranking_, margin, list_top, width - margin * 2,
                (buttons_y - gap) - list_top, TRUE);
     MoveWindow(connect_button_, margin, buttons_y, scaled(window_, 190), button_height, TRUE);
-    MoveWindow(auto_button_, margin + scaled(window_, 198), buttons_y,
+    MoveWindow(details_button_, margin + scaled(window_, 198), buttons_y,
+               scaled(window_, 100), button_height, TRUE);
+    MoveWindow(auto_button_, margin + scaled(window_, 306), buttons_y,
                scaled(window_, 210), button_height, TRUE);
-    MoveWindow(history_button_, margin + scaled(window_, 416), buttons_y,
+    MoveWindow(history_button_, margin + scaled(window_, 524), buttons_y,
                scaled(window_, 100), button_height, TRUE);
     MoveWindow(result_label_, margin, height - scaled(window_, 48), width - margin * 2,
                scaled(window_, 38), TRUE);
@@ -377,7 +449,8 @@ class GuiApp {
                         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     const HWND controls[]{status_label_, refresh_button_, target_label_, target_combo_,
                           target_apply_button_, ranking_, connect_button_, auto_button_,
-                          history_button_, result_label_, history_list_};
+                          details_button_, history_button_, result_label_, history_list_,
+                          details_text_};
     for (HWND control : controls) apply_font(control);
   }
 
@@ -399,6 +472,9 @@ class GuiApp {
         break;
       case id_connect:
         request_connect();
+        break;
+      case id_details:
+        show_selected_details();
         break;
       case id_auto:
         request_auto_toggle();
@@ -424,6 +500,7 @@ class GuiApp {
       result.has_status = true;
       try {
         auto aps = wlan.scan(std::nullopt);
+        storage_.record_observations(aps);
         std::set<std::string> unique_ssids;
         for (const auto& ap : aps) {
           if (!ap.ssid.empty()) unique_ssids.insert(ap.ssid);
@@ -664,9 +741,11 @@ class GuiApp {
       set_list_text(inserted, 3, std::to_wstring(item.ap.signal_quality));
       set_list_text(inserted, 4, std::to_wstring(item.ap.channel));
       wchar_t score[32]{};
-      swprintf_s(score, L"%.1f", item.scoring.score);
+      swprintf_s(score, L"%.1f", item.scoring.quality_score);
       set_list_text(inserted, 5, score);
-      set_list_text(inserted, 6, item.ap.current ? L"Yes" : L"");
+      swprintf_s(score, L"%.1f", item.scoring.score);
+      set_list_text(inserted, 6, score);
+      set_list_text(inserted, 7, item.ap.current ? L"Yes" : L"");
     }
   }
 
@@ -704,7 +783,105 @@ class GuiApp {
     EnableWindow(target_combo_, enabled);
     EnableWindow(target_apply_button_, enabled);
     EnableWindow(connect_button_, enabled && !ranked_.empty());
+    EnableWindow(details_button_, enabled && !ranked_.empty());
     EnableWindow(auto_button_, enabled);
+  }
+
+  bool ensure_details_window() {
+    if (details_window_) return true;
+    details_window_ = CreateWindowExW(
+        WS_EX_TOOLWINDOW, kDetailsWindowClass, L"Access Point Details",
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, scaled(window_, 720),
+        scaled(window_, 690), window_, nullptr, instance_, this);
+    return details_window_ != nullptr;
+  }
+
+  void show_selected_details() {
+    const int selected = ListView_GetNextItem(ranking_, -1, LVNI_SELECTED);
+    if (selected < 0 || static_cast<std::size_t>(selected) >= ranked_.size()) {
+      SetWindowTextW(result_label_, L"Select an access point in the ranking first.");
+      return;
+    }
+    if (!ensure_details_window()) {
+      SetWindowTextW(result_label_, L"Could not create the AP details window.");
+      return;
+    }
+
+    const auto& item = ranked_[static_cast<std::size_t>(selected)];
+    const auto& ap = item.ap;
+    std::wostringstream text;
+    text << L"SSID: " << to_wide(ap.ssid) << L"\r\n"
+         << L"BSSID: " << to_wide(ap.bssid) << L"\r\n"
+         << L"RSSI: " << ap.rssi_dbm << L" dBm\r\n"
+         << L"Signal Quality: " << ap.signal_quality << L"%\r\n"
+         << L"周波数帯: " << frequency_band(ap.frequency_khz) << L"\r\n"
+         << L"周波数: " << std::fixed << std::setprecision(3)
+         << ap.frequency_khz / 1000.0 << L" MHz\r\n"
+         << L"チャネル番号: " << ap.channel << L"\r\n"
+         << L"PHY規格: " << (ap.phy_standard ? to_wide(*ap.phy_standard) : L"取得不可") << L"\r\n"
+         << L"ビーコン間隔: ";
+    if (ap.beacon_interval_tu) text << *ap.beacon_interval_tu << L" TU";
+    else text << L"取得不可";
+    text << L"\r\n"
+         << L"セキュリティ方式: 取得不可 (Windows APIはSSID単位でのみ提供)\r\n"
+         << L"認証方式: 取得不可 (Windows APIはSSID単位でのみ提供)\r\n"
+         << L"接続状態: " << (ap.current ? L"現在接続中" : L"未接続") << L"\r\n"
+         << L"リンク速度: ";
+    if (!ap.current) {
+      text << L"取得不可 (未接続のため)";
+    } else if (ap.receive_link_speed_bps && ap.transmit_link_speed_bps) {
+      text << std::setprecision(1)
+           << L"受信 " << *ap.receive_link_speed_bps / 1000000.0 << L" Mbps / 送信 "
+           << *ap.transmit_link_speed_bps / 1000000.0 << L" Mbps";
+    } else {
+      text << L"取得不可 (GetIfEntry2で取得できませんでした)";
+    }
+    text << L"\r\n最終検出日時: ";
+    if (ap.last_seen_unix) text << history_time(*ap.last_seen_unix) << L" (本ツールのスキャン観測時刻)";
+    else text << L"取得不可";
+
+    text << L"\r\n\r\nBSS Load\r\n";
+    if (ap.bss_load) {
+      text << L"  Station Count: " << ap.bss_load->station_count << L"\r\n"
+           << L"  Channel Utilization: "
+           << std::lround(ap.bss_load->channel_utilization * 100.0 / 255.0) << L"% (raw "
+           << static_cast<unsigned>(ap.bss_load->channel_utilization) << L"/255)\r\n"
+           << L"  Available Admission Capacity: "
+           << ap.bss_load->available_admission_capacity << L"";
+    } else {
+      text << L"  取得不可 (not advertised)";
+    }
+
+    text << L"\r\n\r\n802.11 Information Elements\r\n"
+         << L"  HT Capabilities (ID 45): " << available_bool(ap.ht_capabilities) << L"\r\n"
+         << L"  VHT Capabilities (ID 191): " << available_bool(ap.vht_capabilities) << L"\r\n"
+         << L"  Extended Capabilities (ID 127): " << available_bool(ap.extended_capabilities) << L"\r\n"
+         << L"  BSS Transition Management: ";
+    if (ap.bss_transition_management) {
+      text << (*ap.bss_transition_management ? L"対応" : L"非対応");
+    } else {
+      text << L"取得不可 (情報なし、またはオクテット不足)";
+    }
+    text << L"\r\n  HE Capabilities: 未対応\r\n"
+         << L"  EHT Capabilities: 未対応\r\n"
+         << L"  Vendor Specific IE (ID 221): ";
+    if (ap.vendor_specific_ie_count) text << *ap.vendor_specific_ie_count << L" 個";
+    else text << L"取得不可";
+
+    text << L"\r\n\r\nスコア\r\n"
+         << L"  品質スコア: " << std::setprecision(1) << item.scoring.quality_score << L" / 73\r\n"
+         << L"  選択スコア: " << item.scoring.score << L" / 100\r\n"
+         << L"  内訳:\r\n";
+    for (const auto& reason : item.scoring.reasons) {
+      text << L"    - " << to_wide(reason) << L"\r\n";
+    }
+
+    const auto details = text.str();
+    SetWindowTextW(details_text_, details.c_str());
+    const auto title = L"AP Details - " + to_wide(ap.bssid);
+    SetWindowTextW(details_window_, title.c_str());
+    ShowWindow(details_window_, SW_RESTORE);
+    SetForegroundWindow(details_window_);
   }
 
   void show_history() {
@@ -827,11 +1004,14 @@ class GuiApp {
   HWND target_apply_button_{};
   HWND ranking_{};
   HWND connect_button_{};
+  HWND details_button_{};
   HWND auto_button_{};
   HWND history_button_{};
   HWND result_label_{};
   HWND history_window_{};
   HWND history_list_{};
+  HWND details_window_{};
+  HWND details_text_{};
   HFONT font_{};
   bool tray_added_{};
   bool exiting_{};

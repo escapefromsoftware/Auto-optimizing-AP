@@ -28,6 +28,45 @@ std::optional<BssLoad> parse_bss_load(std::span<const std::uint8_t> ies) noexcep
   return std::nullopt;
 }
 
+std::optional<InformationElements> parse_information_elements(
+    std::span<const std::uint8_t> ies) noexcept {
+  InformationElements result;
+  std::size_t pos = 0;
+  while (pos < ies.size()) {
+    if (ies.size() - pos < 2) return std::nullopt;
+    const auto id = ies[pos];
+    const auto len = static_cast<std::size_t>(ies[pos + 1]);
+    pos += 2;
+    if (len > ies.size() - pos) return std::nullopt;
+
+    switch (id) {
+      case 45:
+        result.ht_capabilities = true;
+        break;
+      case 127:
+        result.extended_capabilities = true;
+        // Extended Capabilities bit 19 is octet 3, bit 3 (zero-based bit 19).
+        if (len >= 3) {
+          const bool supported = (ies[pos + 2] & 0x08U) != 0;
+          if (!result.bss_transition_management || supported) {
+            result.bss_transition_management = supported;
+          }
+        }
+        break;
+      case 191:
+        result.vht_capabilities = true;
+        break;
+      case 221:
+        ++result.vendor_specific_count;
+        break;
+      default:
+        break;
+    }
+    pos += len;
+  }
+  return result;
+}
+
 int frequency_to_channel(std::uint32_t khz) noexcept {
   const auto mhz = static_cast<int>(khz / 1000);
   if (mhz == 2484) return 14;
@@ -68,8 +107,9 @@ ScoreResult score_access_point(const AccessPoint& ap, const ScorePolicy& policy)
     result.reasons.push_back(s.str());
   }
 
+  double load = 10.0;
   if (ap.bss_load) {
-    const double load = 20.0 * (1.0 - ap.bss_load->channel_utilization / 255.0);
+    load = 20.0 * (1.0 - ap.bss_load->channel_utilization / 255.0);
     result.score += load;
     std::ostringstream s; s << "BSS channel utilization "
                             << std::lround(ap.bss_load->channel_utilization * 100.0 / 255.0)
@@ -89,6 +129,7 @@ ScoreResult score_access_point(const AccessPoint& ap, const ScorePolicy& policy)
                             << std::fixed << std::setprecision(1) << overlap << "/8";
     result.reasons.push_back(s.str());
   }
+  result.quality_score = signal + load + overlap;
 
   double history = 8.5;
   if (ap.history_attempts > 0) {

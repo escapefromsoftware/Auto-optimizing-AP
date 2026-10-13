@@ -19,9 +19,13 @@
 
 IEは `[element-id, length, payload]` のTLVとして残長を毎回確認する。ヘッダー不足、宣言長超過、BSS Load（ID 11）の5バイト未満はいずれも「取得不能」とし、バッファ外を読まない。BSS LoadのStation Count、Channel Utilization、Available Admission Capacityは実測広告値として保持する。
 
+追加IEパーサーも同じ境界検査を共有する考え方で、各要素のヘッダーと宣言長がバッファ内に収まることを確認してから読む。HT Capabilities（ID 45）、VHT Capabilities（ID 191）、Extended Capabilities（ID 127）の存在とVendor Specific（ID 221）の個数を保持する。Extended Capabilitiesは3オクテット以上ある場合だけbit 19を読み、BSS Transition Managementの対応/非対応と、情報不足による不明を区別する。未知IDは長さ分だけ安全にスキップし、途中で壊れたTLVがあれば解析結果全体を取得不能とする。
+
+`WLAN_BSS_ENTRY`のIE領域はエントリ先頭から`ulIeOffset`、長さ`ulIeSize`で参照する。さらに`WLAN_BSS_LIST::dwTotalSize`に対してエントリ位置、オフセット、サイズを段階的に検証してから`span`を構築する。PHY規格はSDKで確認した`dot11BssPhyType`、ビーコン間隔は`usBeaconPeriod`から取得する。
+
 ## スコア
 
-最終値は0～100へ丸め込む。
+品質スコアは信号、BSS Load、同一チャネル近隣の3項だけを合計した0～73点である。選択スコアは従来の最終スコアで、品質スコアへ履歴、失敗ペナルティ、現在APボーナスを加えて0～100へ丸め込む。詳細な式と中立値・平滑化は[スコアリング](SCORING.md)に記載する。
 
 | 要素 | 点数 | 方法 |
 |---|---:|---|
@@ -57,6 +61,10 @@ UIスレッドは通常の`GetMessage`/`DispatchMessage`ループを所有する
 自動最適化表示は`AutoConfig::enabled`だけでなく、`Storage::load_daemon_state()`のPIDを`process_is_running()`で検査する。ON操作は設定を先に保存し、停止中なら同一ディレクトリの`wifiopt.exe`を`start_daemon_process`で`daemon`起動する。起動失敗時はCLIと同じく設定をOFFへ戻す。OFF操作は設定を保存して最大約3秒の停止待ちを行い、現在のWi-Fi接続には触れない。
 
 WLAN接続通知はGUIのウィンドウメッセージへ直接統合しない。`WlanClient::connect_bssid`がワーカースレッド上でNative Wi-Fi通知を条件変数へ集約し、完了した結果だけがGUIメッセージループへ渡る。この境界により、既存の通知処理を変更せず再利用する。
+
+ランキングには品質スコア列と従来の選択スコア列を並べる。選択行のダブルクリックまたは「Details」でモデルレス詳細ウィンドウを表示し、基本無線情報、PHY/ビーコン間隔、BSS Load、IE解析結果、両スコアと既存の理由文字列をまとめる。詳細ウィンドウは起動時に非表示で生成し、GUIスモークテストでボタンと内容コントロールの存在を検証できるようにする。
+
+最終検出日時はAPのビーコンTimestampではない。スキャンでBSSIDを観測した時刻を`Storage::record_observations`が`last_seen.tsv`へ原子的に保存し、その観測時刻であることを画面に明記する。リンク速度は現在接続中のBSSIDだけを対象に、WLANインターフェイスGUIDを`ConvertInterfaceGuidToLuid`で変換し、`GetIfEntry2`の`ReceiveLinkSpeed`/`TransmitLinkSpeed`を読む。未接続APやAPI取得失敗は欠損として明示する。
 
 ## セキュリティ境界
 

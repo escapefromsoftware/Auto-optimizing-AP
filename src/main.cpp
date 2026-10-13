@@ -158,7 +158,8 @@ int main(int argc, char** argv) {
     if (command == "status") { print_status(wlan.status()); return 0; }
     if (command == "scan") {
       const bool filtered = has_option(argc, argv, "--ssid");
-      const auto aps = wlan.scan(filtered ? std::optional<std::string>(config.target_ssid) : std::nullopt);
+      auto aps = wlan.scan(filtered ? std::optional<std::string>(config.target_ssid) : std::nullopt);
+      storage.record_observations(aps);
       std::cout << "Detected " << aps.size() << " BSS entries"
                 << (filtered ? " for " + config.target_ssid : "") << "\n";
       for (const auto& ap : aps) print_ap(ap);

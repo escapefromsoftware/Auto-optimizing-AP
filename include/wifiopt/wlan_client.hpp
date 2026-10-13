@@ -2,6 +2,7 @@
 
 #include "wifiopt/core.hpp"
 
+#include <winsock2.h>
 #include <windows.h>
 #include <wlanapi.h>
 
@@ -37,6 +38,8 @@ struct ConnectionStatus {
   std::string profile;
   int rssi_dbm{-100};
   unsigned signal_quality{};
+  std::optional<std::uint64_t> receive_link_speed_bps;
+  std::optional<std::uint64_t> transmit_link_speed_bps;
 };
 
 struct ConnectResult {
