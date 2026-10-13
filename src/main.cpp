@@ -644,10 +644,43 @@ int main(int argc, char** argv) {
           if (r.improvement) std::cout << *r.improvement; else std::cout << "null";
           std::cout << ",\"cooldown_active\":false,\"recommended\":";
           if (r.recommended) std::cout << access_point_json(r.recommended->ap, &r.recommended->scoring, explain); else std::cout << "null";
+          if (r.action_taken) {
+            std::cout << ",\"ip_verification\":";
+            if (r.ip_verification) {
+              std::cout << "{\"verified\":" << (r.ip_verification->verified ? "true" : "false")
+                        << ",\"timed_out\":" << (r.ip_verification->timed_out ? "true" : "false")
+                        << ",\"api_error\":" << r.ip_verification->api_error
+                        << ",\"detail\":\"" << json_escape(r.ip_verification->detail) << "\"}";
+            } else std::cout << "null";
+            const auto print_quality_json = [](const std::optional<ConnectionQuality>& quality) {
+              if (quality) std::cout << "{\"rssi_dbm\":" << quality->rssi_dbm
+                                     << ",\"signal_quality\":" << quality->signal_quality << '}';
+              else std::cout << "null";
+            };
+            std::cout << ",\"before_quality\":";
+            print_quality_json(r.before_quality);
+            std::cout << ",\"after_quality\":";
+            print_quality_json(r.after_quality);
+          }
           std::cout << "}}\n";
         } else {
           std::cout << r.message << "\n";
           if (r.recommended) std::cout << "Recommended: " << r.recommended->ap.bssid << " score=" << std::fixed << std::setprecision(1) << r.recommended->scoring.score << "\n";
+          if (r.action_taken) {
+            std::cout << "IP verification: ";
+            if (r.ip_verification) std::cout << (r.ip_verification->verified ? "passed" : "failed")
+                                             << " (" << r.ip_verification->detail << ")";
+            else std::cout << "not performed (BSSID connection was not verified)";
+            std::cout << "\nBefore quality: ";
+            if (r.before_quality) std::cout << r.before_quality->rssi_dbm << " dBm, "
+                                            << r.before_quality->signal_quality << "%";
+            else std::cout << "unavailable";
+            std::cout << "\nAfter quality: ";
+            if (r.after_quality) std::cout << r.after_quality->rssi_dbm << " dBm, "
+                                           << r.after_quality->signal_quality << "%";
+            else std::cout << "unavailable";
+            std::cout << "\n";
+          }
           if (explain) {
             std::cout << "Threshold: " << config.min_improvement << "\nImprovement: ";
             if (r.improvement) std::cout << *r.improvement; else std::cout << "not applicable";

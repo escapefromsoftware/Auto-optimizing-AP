@@ -40,9 +40,13 @@ Station Countは表示だけに用い、負荷へ変換しない。遅延は本�
 
 ## 接続と復旧
 
-保存済みプロファイルを名前または読取専用XML内SSIDで検索し、`WLAN_CONNECTION_PARAMETERS::pDesiredBssidList`に1件を設定する。通知は対象インターフェイスの接続完了/失敗だけを待ち、既定25秒でタイムアウトする。完了後は`wlan_intf_opcode_current_connection`を再取得し、希望BSSIDとの一致を判定する。成功扱いは通知成功かつ実BSSID一致の場合だけである。
+保存済みプロファイルを名前または読取専用XML内SSIDで検索し、`WLAN_CONNECTION_PARAMETERS::pDesiredBssidList`に1件を設定する。通知は対象インターフェイスの接続完了/失敗だけを待ち、既定25秒でタイムアウトする。完了後は`wlan_intf_opcode_current_connection`を再取得し、希望BSSIDとの一致を判定する。
 
-失敗時、開始前が同じSSIDへの接続なら元BSSIDへの復帰を1回だけ試す。無限再試行はない。各試行の希望/実BSSID、時刻、APIまたはWLAN reason code、説明を履歴へ保存する。
+自動最適化のClosed-loop Optimizationは、切替要求、実BSSID一致確認、対象WLANインターフェイスのIPv4確認、切替前後のRSSI/Signal Quality比較、履歴/Black Box記録の順で進む。IPv4確認はインターフェイスGUIDをLUIDへ変換し、`GetAdaptersAddresses(AF_INET)`のユニキャスト一覧だけを500 ms間隔、最大約8秒読み取る。未割当、0/8、loopback、APIPA（169.254/16）、multicast以上は有効なIPv4とみなさない。外部パケットは送信しない。自動切替の成功扱いは、WLAN通知成功、実BSSID一致、有効IPv4確認の3条件をすべて満たした場合だけである。
+
+BSSID不一致またはIPv4確認失敗時、開始前が同じSSIDへの接続なら元BSSIDへの復帰を1回だけ試す。復帰側も実BSSIDとIPv4を確認するが、接続要求の再試行は増やさず、無限再試行はない。各試行の希望/実BSSID、時刻、APIまたはWLAN reason code、説明、実施した場合のIPv4確認結果を履歴とBlack Boxへ保存する。履歴TSVの8列目はオプショナルなIPv4確認結果で、旧7列行も継続して読み込む。
+
+`optimize --dry-run`はランキングとヒステリシス判定後、接続要求より前に終了するため、IPv4確認も行わない。手動`connect`とGUIの手動接続は従来どおりWLAN通知と実BSSIDだけを判定し、この検証ループの対象外である。
 
 ## 常駐監視
 

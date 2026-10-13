@@ -247,3 +247,52 @@ Priority 1実装時は、インストール済みWindows SDK 10.0.26100.0の`um\
 - イベントログの全Windows言語・全OSビルド・全イベントスキーマに対する互換性
 
 通常の`connect`、接続変更を伴う`optimize`、daemonによるAP切替、Windows設定変更、イベントログ変更は実施していない。取得したイベントは読み取りのみである。
+
+## Priority 4: Closed-loop Optimization（2026-10-14）
+
+### ビルドと単体テスト
+
+- Visual Studio Build Tools 18.6.3、MSVC、Windows SDK 10.0.26100.0、C++20を使用した。
+- Release全ターゲット（`wifiopt.exe`、`wifiopt_gui.exe`、`wifiopt_tests.exe`）: 成功。ビルド出力に警告・エラーなし。
+- Debug全ターゲット: 成功。ビルド出力に警告・エラーなし。
+- `ctest --test-dir build -C Release --output-on-failure`: 1/1成功、0失敗。
+- `ctest --test-dir build -C Debug --output-on-failure`: 1/1成功、0失敗。
+- Release/Debugの`wifiopt_tests.exe`を直接実行し、両方で`All 21 test groups passed`を確認した。従来19群を維持し、Priority 4用に2群を追加した。
+
+追加・拡張テストで次を確認した。
+
+| 項目 | 結果 |
+|---|---|
+| 通常のprivate IPv4（192.168/16、10/8）を有効と判定 | 成功 |
+| 0.0.0.0、loopback、APIPA境界（169.254.0.1、169.254.255.255）、multicast、255.255.255.255を無効と判定 | 成功 |
+| APIPA範囲外の169.255.x.xをアドレス規則上のunicastとして扱う境界 | 成功 |
+| IP確認列のない旧7列`ConnectionRecord`履歴を読み込み、IP結果を`nullopt`として保持 | 成功 |
+| 新8列履歴のIP失敗値を保存・再読込 | 成功 |
+| IP失敗をBlack Boxへ保存・再読込し、原因候補を非APIPA IPv4未取得として保持 | 成功 |
+| 既存の全テスト群 | 成功 |
+
+### ビルド済みCLIのdry-run確認
+
+リポジトリ内の分離データディレクトリ`.runtime\priority4-dry-run`を`WIFIOPT_DATA_DIR`に指定し、ビルド済みexeで`wifiopt optimize --dry-run`を実行した。接続要求、IP確認、履歴追記は行われず、実行後も`history.tsv`が存在しないことを確認した。コードレビューでもdry-run分岐が`connect_bssid`および`wait_for_interface_ipv4`より前にreturnすることを確認した。
+
+ただし、判定に必要な読み取り専用スキャンをWindowsがエラー5（位置情報アクセス拒否）で拒否したため、Debug版は終了コード1となり、候補BSSID/ヒステリシス判定結果の表示まで到達しなかった。最終再リンク後のRelease版はWindows Application Control policyによりプロセス起動自体も拒否された。したがって「ビルド済みexeでエラーなく判定結果が表示されること」はこの環境では**未確認**であり、成功扱いにしない。位置情報またはApplication Control設定は変更していない。
+
+### コードレビューで確認した内容
+
+- `GetAdaptersAddresses(AF_INET)`は対象WLAN GUIDをLUIDへ変換して同一アダプタだけを読み、外部ホストへパケットを送らない。
+- IPv4待機は500 ms間隔、最大約8秒で、APIの`ERROR_NO_DATA`と「まだ有効アドレスなし」を再確認する。API自体のエラーでは直ちに失敗する。
+- IPv4アドレスはDAD状態がPreferredまたはDeprecatedで、0/8、loopback、APIPA、multicast以上でない場合だけ有効とする。
+- 自動最適化成功はWLAN通知成功、希望/実BSSID一致、有効IPv4確認の論理積である。
+- BSSID不一致またはIP確認失敗時だけ、既存条件を満たせば元BSSIDへ1回だけ接続要求する。接続要求の無制限再試行はない。
+- ロールバック側も実BSSIDとIPv4を確認し、履歴とBlack BoxへオプショナルなIP結果を記録する。
+- 手動`connect`はIP検証を呼ばず、従来のWLAN通知成功かつBSSID一致の判定を維持する。
+- `gui_main.cpp`は変更していない。
+
+### 実機未検証・対象外
+
+- 実APへの切替、希望BSSIDと実BSSIDの照合、切替後の実IPv4取得は実施していない。
+- IP未取得を実際に発生させる試験と、それに続く元BSSIDへの実ロールバックは実施していない。
+- ping、HTTP、DNS、既定ゲートウェイ等の外部疎通確認は設計どおり実装・実行していない。
+- 8秒を超えるDHCP環境、複数WLANアダプタ、DAD遷移中、スリープ復帰直後の実機タイミングは未検証である。
+
+これらは、実Wi-Fi接続を変更しないという安全制約と、Windows位置情報/Application Controlポリシーによる制限のためである。単体テスト、ビルド、コードレビューの成功を実機AP切替やIP確認の成功とはみなしていない。

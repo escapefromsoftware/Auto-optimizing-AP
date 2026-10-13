@@ -455,7 +455,9 @@ std::string blackbox_record_json(const BlackBoxRecord& record) {
       << "\",\"detail\":\"" << json_escape(record.detail)
       << "\",\"possible_cause\":\"" << json_escape(record.possible_cause)
       << "\",\"recommended_action\":\"" << json_escape(record.recommended_action)
-      << "\",\"observations_before\":[";
+      << "\",\"ip_address_verified\":";
+  json_optional_bool(out, record.ip_address_verified);
+  out << ",\"observations_before\":[";
   for (std::size_t i = 0; i < record.observations_before.size(); ++i) {
     if (i) out << ',';
     out << observation_json(record.observations_before[i]);
@@ -494,6 +496,7 @@ BlackBoxRecord parse_blackbox_record_json(std::string_view text) {
   record.detail = string_member(root, "detail");
   record.possible_cause = string_member(root, "possible_cause");
   record.recommended_action = string_member(root, "recommended_action");
+  optional_bool(root, "ip_address_verified", record.ip_address_verified);
   if (const auto* before = member(root, "observations_before")) {
     for (const auto& value : array(*before, "observations_before"))
       record.observations_before.push_back(parse_observation(value));

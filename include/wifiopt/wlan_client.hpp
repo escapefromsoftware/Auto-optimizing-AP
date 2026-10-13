@@ -7,6 +7,7 @@
 #include <wlanapi.h>
 
 #include <chrono>
+#include <array>
 #include <condition_variable>
 #include <mutex>
 #include <optional>
@@ -40,6 +41,15 @@ struct ConnectionStatus {
   unsigned signal_quality{};
   std::optional<std::uint64_t> receive_link_speed_bps;
   std::optional<std::uint64_t> transmit_link_speed_bps;
+  GUID interface_guid{};
+};
+
+struct IpVerificationResult {
+  bool verified{};
+  bool timed_out{};
+  DWORD api_error{};
+  std::vector<std::array<std::uint8_t, 4>> addresses;
+  std::string detail;
 };
 
 struct ConnectResult {
@@ -85,5 +95,11 @@ class WlanClient {
 };
 
 std::string windows_error_message(DWORD code);
+bool is_usable_unicast_ipv4(const std::array<std::uint8_t, 4>& address) noexcept;
+IpVerificationResult check_interface_ipv4(const GUID& interface_guid);
+IpVerificationResult wait_for_interface_ipv4(
+    const GUID& interface_guid,
+    std::chrono::milliseconds timeout = std::chrono::seconds(8),
+    std::chrono::milliseconds poll_interval = std::chrono::milliseconds(500));
 
 } // namespace wifiopt

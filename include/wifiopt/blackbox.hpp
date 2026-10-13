@@ -43,6 +43,7 @@ struct BlackBoxRecord {
   std::string recommended_action;
   std::vector<WifiObservation> observations_before;
   WifiObservation event_observation;
+  std::optional<bool> ip_address_verified;
 };
 
 const char* blackbox_event_type_name(BlackBoxEventType type) noexcept;

@@ -200,7 +200,9 @@ void Storage::append_history(const ConnectionRecord& r) const {
   if (!out) throw std::runtime_error("cannot append connection history");
   out << r.unix_time << '\t' << escape_field(r.ssid) << '\t' << escape_field(normalize_bssid(r.requested_bssid))
       << '\t' << escape_field(normalize_bssid(r.actual_bssid)) << '\t' << (r.success ? 1 : 0)
-      << '\t' << r.error_code << '\t' << escape_field(r.detail) << '\n';
+      << '\t' << r.error_code << '\t' << escape_field(r.detail) << '\t';
+  if (r.ip_address_verified) out << (*r.ip_address_verified ? 1 : 0);
+  out << '\n';
 }
 
 std::vector<ConnectionRecord> Storage::load_history(std::size_t limit) const {
@@ -209,10 +211,16 @@ std::vector<ConnectionRecord> Storage::load_history(std::size_t limit) const {
   std::string line;
   while (std::getline(in, line)) {
     const auto f = split_tabs(line);
-    if (f.size() != 7) continue;
+    if (f.size() != 7 && f.size() != 8) continue;
     try {
+      std::optional<bool> ip_address_verified;
+      if (f.size() == 8 && !f[7].empty()) {
+        if (f[7] != "0" && f[7] != "1") continue;
+        ip_address_verified = f[7] == "1";
+      }
       rows.push_back({std::stoll(f[0]), f[1], f[2], f[3], f[4] == "1",
-                      static_cast<std::uint32_t>(std::stoul(f[5])), f[6]});
+                      static_cast<std::uint32_t>(std::stoul(f[5])), f[6],
+                      ip_address_verified});
     } catch (...) { /* Ignore damaged individual history rows. */ }
   }
   if (rows.size() > limit) rows.erase(rows.begin(), rows.end() - static_cast<std::ptrdiff_t>(limit));

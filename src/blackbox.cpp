@@ -92,6 +92,13 @@ std::optional<BlackBoxRecord> BlackBox::record_connection(
   auto record = make_record(type, connection.unix_time, connection.error_code,
                             connection.ssid, related, requested, actual,
                             connection.detail, std::move(event));
+  record.ip_address_verified = connection.ip_address_verified;
+  if (record.ip_address_verified && !*record.ip_address_verified) {
+    record.possible_cause =
+        "The requested BSSID was reached, but the WLAN adapter did not obtain a usable non-APIPA IPv4 address before the bounded timeout.";
+    record.recommended_action =
+        "Review DHCP, VLAN, and local adapter events; internet reachability was intentionally not tested.";
+  }
   persist(record);
   return record;
 }

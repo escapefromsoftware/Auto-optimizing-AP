@@ -8,6 +8,19 @@
 #include <thread>
 
 namespace wifiopt {
+namespace {
+
+std::optional<ConnectionQuality> connection_quality(const ConnectionStatus& status) {
+  if (!status.connected) return std::nullopt;
+  return ConnectionQuality{status.rssi_dbm, status.signal_quality};
+}
+
+std::string verification_detail(const IpVerificationResult& verification) {
+  return std::string("IPv4 verification ") +
+         (verification.verified ? "passed: " : "failed: ") + verification.detail;
+}
+
+} // namespace
 
 std::vector<RankedAccessPoint> Optimizer::rank(WlanClient& wlan, const std::string& ssid) {
   // Scan every SSID so co-channel neighbor counts include other networks too.
@@ -28,6 +41,7 @@ OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& conf
   if (ranked.empty()) { out.message = "No BSS found for SSID '" + config.target_ssid + "'"; return out; }
   out.recommended = ranked.front();
   const auto before = wlan.status();
+  out.before_quality = connection_quality(before);
   if (blackbox_) blackbox_->observe(make_wifi_observation(before));
   const auto current = std::find_if(ranked.begin(), ranked.end(), [](const auto& item) { return item.ap.current; });
   if (ranked.front().ap.current) {
@@ -58,35 +72,58 @@ OptimizeResult Optimizer::optimize_once(WlanClient& wlan, const AutoConfig& conf
   out.action_taken = true;
   out.connection = wlan.connect_bssid(config.target_ssid, ranked.front().ap.bssid);
   const auto& c = *out.connection;
-  out.success = c.success && c.desired_bssid_matched;
-  const auto after = wlan.status();
+  auto after = wlan.status();
+  if (c.success && c.desired_bssid_matched && after.connected) {
+    out.ip_verification = wait_for_interface_ipv4(after.interface_guid);
+    after = wlan.status();
+  }
+  out.after_quality = connection_quality(after);
+  out.success = c.success && c.desired_bssid_matched && out.ip_verification &&
+                out.ip_verification->verified;
+  std::string connection_detail = c.detail;
+  if (out.ip_verification) connection_detail += "; " + verification_detail(*out.ip_verification);
+  std::uint32_t error_code = c.api_error ? c.api_error : c.reason_code;
+  if (!error_code && out.ip_verification && out.ip_verification->api_error)
+    error_code = out.ip_verification->api_error;
   const ConnectionRecord connection_record{
       unix_now(), config.target_ssid, c.requested_bssid, c.actual_bssid, out.success,
-      c.api_error ? c.api_error : c.reason_code, c.detail};
+      error_code, connection_detail,
+      out.ip_verification ? std::optional<bool>(out.ip_verification->verified) : std::nullopt};
   storage_.append_history(connection_record);
   if (blackbox_) {
     blackbox_->record_connection(connection_record, make_wifi_observation(after));
     blackbox_->observe(make_wifi_observation(after), true);
   }
-  out.message = c.detail;
+  out.message = connection_detail;
 
   if (!out.success && before.connected && before.ssid == config.target_ssid && valid_bssid(before.bssid)) {
     // One bounded rollback attempt; never modify the saved enterprise profile.
     auto rollback = wlan.connect_bssid(config.target_ssid, before.bssid, std::chrono::seconds(20));
-    const auto after_rollback = wlan.status();
+    auto after_rollback = wlan.status();
+    std::optional<IpVerificationResult> rollback_ip;
+    if (rollback.success && rollback.desired_bssid_matched && after_rollback.connected) {
+      rollback_ip = wait_for_interface_ipv4(after_rollback.interface_guid);
+      after_rollback = wlan.status();
+    }
+    const bool rollback_verified = rollback.success && rollback.desired_bssid_matched &&
+                                   rollback_ip && rollback_ip->verified;
+    std::string rollback_detail = "rollback: " + rollback.detail;
+    if (rollback_ip) rollback_detail += "; " + verification_detail(*rollback_ip);
+    std::uint32_t rollback_error = rollback.api_error ? rollback.api_error : rollback.reason_code;
+    if (!rollback_error && rollback_ip && rollback_ip->api_error)
+      rollback_error = rollback_ip->api_error;
     const ConnectionRecord rollback_record{
         unix_now(), config.target_ssid, before.bssid, rollback.actual_bssid,
-        rollback.success && rollback.desired_bssid_matched,
-        rollback.api_error ? rollback.api_error : rollback.reason_code,
-        "rollback: " + rollback.detail};
+        rollback_verified, rollback_error, rollback_detail,
+        rollback_ip ? std::optional<bool>(rollback_ip->verified) : std::nullopt};
     storage_.append_history(rollback_record);
     if (blackbox_) {
       blackbox_->record_connection(rollback_record, make_wifi_observation(after_rollback));
       blackbox_->observe(make_wifi_observation(after_rollback), true);
     }
-    out.message += rollback.success && rollback.desired_bssid_matched
+    out.message += rollback_verified
                        ? "; original BSSID restored"
-                       : "; rollback did not restore the original BSSID";
+                       : "; rollback did not restore verified IPv4 connectivity";
   }
   return out;
 }
