@@ -50,8 +50,11 @@ wifiopt scan --format csv
 
 通常実行は従来どおり1回評価し、必要なら接続を試みます。`--dry-run` は同じランキング・改善幅・ヒステリシス判定を行いますが、`connect_bssid` を呼ばず履歴も追加しません。
 
+通常実行で接続試行が発生した場合だけ、従来のメッセージと推奨BSSIDに加えて、IP確認結果、切替前品質、切替後品質を表示します。品質はRSSI（dBm）とWindows Signal Quality（%）です。JSONでは`ip_verification`、`before_quality`、`after_quality`を追加し、未実施/取得不能は`null`です。IP確認は有効な非APIPA IPv4アドレスの取得有無であり、外部ホストへの到達性を意味しません。
+
 - `--explain`: 改善幅、閾値、クールダウン状態、推奨APのスコア理由を表示する。
 - one-shot CLIのクールダウン時刻は永続化されていないため、説明では非アクティブと表示する。常駐監視のクールダウンはdaemonプロセス内で管理される。
+- `--dry-run`では接続、IP確認、履歴記録を行わず、上記の検証結果フィールドも追加表示しない。
 
 ### `history [--stats]`
 

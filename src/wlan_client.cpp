@@ -124,6 +124,93 @@ std::string windows_error_message(DWORD code) {
 WifiError::WifiError(std::string operation, DWORD code)
     : std::runtime_error(operation + " failed (" + std::to_string(code) + "): " + windows_error_message(code)), code_(code) {}
 
+bool is_usable_unicast_ipv4(const std::array<std::uint8_t, 4>& address) noexcept {
+  if (address[0] == 0 || address[0] == 127 || address[0] >= 224) return false;
+  if (address[0] == 169 && address[1] == 254) return false;
+  return true;
+}
+
+IpVerificationResult check_interface_ipv4(const GUID& interface_guid) {
+  IpVerificationResult result;
+  NET_LUID wanted_luid{};
+  const DWORD luid_error = ConvertInterfaceGuidToLuid(&interface_guid, &wanted_luid);
+  if (luid_error != NO_ERROR) {
+    result.api_error = luid_error;
+    result.detail = "Could not identify the WLAN adapter for IPv4 verification: " +
+                    windows_error_message(luid_error);
+    return result;
+  }
+
+  ULONG buffer_size = 15 * 1024;
+  std::vector<std::uint8_t> buffer(buffer_size);
+  PIP_ADAPTER_ADDRESSES adapters = nullptr;
+  ULONG rc = ERROR_BUFFER_OVERFLOW;
+  for (unsigned attempt = 0; attempt < 2 && rc == ERROR_BUFFER_OVERFLOW; ++attempt) {
+    buffer.resize(buffer_size);
+    adapters = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+    rc = GetAdaptersAddresses(AF_INET,
+                              GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                  GAA_FLAG_SKIP_DNS_SERVER,
+                              nullptr, adapters, &buffer_size);
+  }
+  if (rc == ERROR_NO_DATA) {
+    result.detail = "The WLAN adapter has no assigned IPv4 address";
+    return result;
+  }
+  if (rc != NO_ERROR) {
+    result.api_error = rc;
+    result.detail = "GetAdaptersAddresses failed: " + windows_error_message(rc);
+    return result;
+  }
+
+  bool adapter_found = false;
+  for (auto* adapter = adapters; adapter; adapter = adapter->Next) {
+    if (adapter->Luid.Value != wanted_luid.Value) continue;
+    adapter_found = true;
+    for (auto* unicast = adapter->FirstUnicastAddress; unicast; unicast = unicast->Next) {
+      if (!unicast->Address.lpSockaddr || unicast->Address.lpSockaddr->sa_family != AF_INET) continue;
+      if (unicast->DadState != IpDadStatePreferred &&
+          unicast->DadState != IpDadStateDeprecated) continue;
+      const auto* address = reinterpret_cast<const sockaddr_in*>(unicast->Address.lpSockaddr);
+      std::array<std::uint8_t, 4> bytes{};
+      std::memcpy(bytes.data(), &address->sin_addr, bytes.size());
+      result.addresses.push_back(bytes);
+      if (is_usable_unicast_ipv4(bytes)) {
+        result.verified = true;
+        result.detail = "Usable non-APIPA IPv4 address acquired";
+        return result;
+      }
+    }
+    break;
+  }
+  result.detail = adapter_found
+                      ? "The WLAN adapter has no usable non-APIPA IPv4 address"
+                      : "The WLAN adapter was not returned by GetAdaptersAddresses";
+  return result;
+}
+
+IpVerificationResult wait_for_interface_ipv4(const GUID& interface_guid,
+                                              std::chrono::milliseconds timeout,
+                                              std::chrono::milliseconds poll_interval) {
+  if (timeout < std::chrono::milliseconds::zero()) timeout = std::chrono::milliseconds::zero();
+  if (poll_interval <= std::chrono::milliseconds::zero())
+    poll_interval = std::chrono::milliseconds(1);
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  IpVerificationResult result;
+  while (true) {
+    result = check_interface_ipv4(interface_guid);
+    if (result.verified || result.api_error != NO_ERROR) return result;
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      result.timed_out = true;
+      result.detail += " before the IPv4 verification timeout";
+      return result;
+    }
+    std::this_thread::sleep_for(std::min(poll_interval,
+                                         std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
+  }
+}
+
 WlanClient::WlanClient() {
   const DWORD rc = WlanOpenHandle(2, nullptr, &negotiated_version_, &handle_);
   if (rc != ERROR_SUCCESS) throw WifiError("WlanOpenHandle", rc);
@@ -161,6 +248,7 @@ ConnectionStatus WlanClient::status() const {
     result.ssid = ssid_string(attr->wlanAssociationAttributes.dot11Ssid);
     result.bssid = bssid_string(attr->wlanAssociationAttributes.dot11Bssid);
     result.profile = wide_to_utf8(attr->strProfileName);
+    result.interface_guid = iface.guid;
     result.signal_quality = attr->wlanAssociationAttributes.wlanSignalQuality;
     PLONG rssi = nullptr;
     size = 0;

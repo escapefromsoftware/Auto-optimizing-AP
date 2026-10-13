@@ -83,6 +83,7 @@ struct ConnectionRecord {
   bool success{};
   std::uint32_t error_code{};
   std::string detail;
+  std::optional<bool> ip_address_verified;
 };
 
 struct AutoConfig {

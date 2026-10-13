@@ -9,6 +9,11 @@
 
 namespace wifiopt {
 
+struct ConnectionQuality {
+  int rssi_dbm{-100};
+  unsigned signal_quality{};
+};
+
 struct OptimizeResult {
   bool action_taken{};
   bool would_switch{};
@@ -20,6 +25,9 @@ struct OptimizeResult {
   std::optional<double> improvement;
   double threshold{};
   bool cooldown_active{};
+  std::optional<ConnectionQuality> before_quality;
+  std::optional<ConnectionQuality> after_quality;
+  std::optional<IpVerificationResult> ip_verification;
 };
 
 class Optimizer {

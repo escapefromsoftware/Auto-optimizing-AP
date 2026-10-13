@@ -3,6 +3,7 @@
 #include "wifiopt/cli.hpp"
 #include "wifiopt/eventlog.hpp"
 #include "wifiopt/storage.hpp"
+#include "wifiopt/wlan_client.hpp"
 
 #include <windows.h>
 
@@ -179,6 +180,44 @@ void test_retry_limiter() {
   CHECK(limiter.allow(t + std::chrono::seconds(5)));
   CHECK(!limiter.allow(t + std::chrono::seconds(20)));
   CHECK(limiter.attempts() == 2);
+}
+
+void test_usable_unicast_ipv4_classification() {
+  CHECK(is_usable_unicast_ipv4(std::array<std::uint8_t, 4>{192, 168, 10, 20}));
+  CHECK(is_usable_unicast_ipv4(std::array<std::uint8_t, 4>{10, 0, 0, 1}));
+  CHECK(is_usable_unicast_ipv4(std::array<std::uint8_t, 4>{169, 255, 1, 1}));
+  CHECK(!is_usable_unicast_ipv4(std::array<std::uint8_t, 4>{0, 0, 0, 0}));
+  CHECK(!is_usable_unicast_ipv4(std::array<std::uint8_t, 4>{127, 0, 0, 1}));
+  CHECK(!is_usable_unicast_ipv4(std::array<std::uint8_t, 4>{169, 254, 0, 1}));
+  CHECK(!is_usable_unicast_ipv4(std::array<std::uint8_t, 4>{169, 254, 255, 255}));
+  CHECK(!is_usable_unicast_ipv4(std::array<std::uint8_t, 4>{224, 0, 0, 1}));
+  CHECK(!is_usable_unicast_ipv4(std::array<std::uint8_t, 4>{255, 255, 255, 255}));
+}
+
+void test_old_history_format_remains_readable() {
+  const auto root = std::filesystem::temp_directory_path() /
+                    ("wifiopt-old-history-" + std::to_string(GetCurrentProcessId()));
+  std::filesystem::remove_all(root);
+  {
+    Storage storage(root);
+    {
+      std::ofstream history(root / "history.tsv", std::ios::binary);
+      history << "123\tAP-TUT5\t98:8F:00:41:42:83\t98:8F:00:41:42:83\t1\t0\tlegacy row\n";
+    }
+    auto rows = storage.load_history();
+    CHECK(rows.size() == 1);
+    CHECK(rows[0].detail == "legacy row");
+    CHECK(!rows[0].ip_address_verified.has_value());
+
+    storage.append_history({124, "AP-TUT5", "98:8F:00:41:42:84",
+                            "98:8F:00:41:42:84", false, 0,
+                            "IPv4 verification failed", std::optional<bool>{false}});
+    rows = storage.load_history();
+    CHECK(rows.size() == 2);
+    CHECK(rows[1].ip_address_verified.has_value());
+    CHECK(!*rows[1].ip_address_verified);
+  }
+  std::filesystem::remove_all(root);
 }
 
 void test_storage_initial_off_and_history() {
@@ -359,6 +398,17 @@ void test_blackbox_rotation_and_bssid_attribution() {
     CHECK(mismatch.has_value());
     CHECK(mismatch->event_type == BlackBoxEventType::ap_switch_failure);
     CHECK(mismatch->related_bssid == "00:00:00:00:00:20");
+
+    const auto no_ip = blackbox.record_connection(
+        {202, "test", "00:00:00:00:00:30", "00:00:00:00:00:30", false, 0,
+         "IPv4 verification failed", std::optional<bool>{false}});
+    CHECK(no_ip.has_value());
+    CHECK(no_ip->ip_address_verified.has_value() && !*no_ip->ip_address_verified);
+    CHECK(no_ip->possible_cause.find("non-APIPA IPv4") != std::string::npos);
+    const auto reloaded = blackbox.load_records();
+    CHECK(!reloaded.empty());
+    CHECK(reloaded.back().ip_address_verified.has_value());
+    CHECK(!*reloaded.back().ip_address_verified);
   }
   std::filesystem::remove_all(root);
 }
@@ -397,6 +447,8 @@ int main() {
   test_failure_history_penalty();
   test_bssid_and_channels();
   test_retry_limiter();
+  test_usable_unicast_ipv4_classification();
+  test_old_history_format_remains_readable();
   test_storage_initial_off_and_history();
   test_storage_target_ssid_update_preserves_other_fields();
   test_scan_json_round_trip_and_duration_parser();
@@ -406,6 +458,6 @@ int main() {
   test_blackbox_rotation_and_bssid_attribution();
   test_eventlog_xml_parser();
   if (failures) { std::cerr << failures << " test assertion(s) failed\n"; return 1; }
-  std::cout << "All 19 test groups passed\n";
+  std::cout << "All 21 test groups passed\n";
   return 0;
 }
